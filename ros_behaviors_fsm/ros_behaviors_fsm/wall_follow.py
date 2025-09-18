@@ -31,7 +31,7 @@ class WallApproachNode(Node):
         self.vel = 0.5
 
     def run_loop(self):
-
+        """Reset drive and then drive unless told to stop"""
         self.drive(linear=0.0, angular=0.0)
 
         if not self.stop:
@@ -39,6 +39,7 @@ class WallApproachNode(Node):
             sleep(0.1)
 
     def process_scan(self, msg):
+        """Check if distance in front of neato is less then target distance"""
         if msg.ranges[0] != 0.0:
             #
             if msg.ranges[0] < self.target_distance:
