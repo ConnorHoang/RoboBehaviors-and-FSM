@@ -43,13 +43,15 @@ class NeatoFsm(Node):
         # value to trigger stop in driving
         self.stop = False
         # value for forward velocity of neato
-        self.vel = 0.3
+        self.vel = 0.1
         # velocity (speed and angle) of Neato
         self.velocity = Twist()
         # bump boolean for physical sensor where True is bumped
         self.bumped = Event()
         # FSM state the robot is currently in
         self.state = "approach"
+        # array of last 5 distances to right wall
+        self.right_distance = []
         # Thread to process main loop logic
         self.main_loop_thread = Thread(target=self.run_loop)
 
@@ -149,7 +151,7 @@ class NeatoFsm(Node):
             self.state = "bump"
             self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
         
-    def turn(self):
+    def turn(self, dist_front):
         """Turn state. Turn counterclockwise until Neato is ~parralel to wall on right and no wall in front
         
         Args:
@@ -161,9 +163,10 @@ class NeatoFsm(Node):
         self.drive(self.velocity, linear=0.0, angular=60.0)
         sleep(0.1)
 
-    def wall_follow(self):
+    def wall_follow(self, dist_front, dist_right, dist_right_avg):
         """
-        Drives in parralel to wall. Self-correcting by detecing distance wall on the right and turning to stay within range.
+        Drives in parralel to wall. Self-correcting by detecing distance wall on the right, comparing to average of previous times, 
+        and turning to stay within range of wall. Tuning is important
 
         Args:
             
@@ -172,7 +175,15 @@ class NeatoFsm(Node):
             Turn right/left
         """
 
-        pass
+        correction_increment = 0.1
+
+        if dist_front > dist_right_avg:
+            self.correction_angle = self.correction_angle + correction_increment
+        elif dist_right < dist_right_avg:
+            self.correction_angle = self.correction_angle - correction_increment
+
+        self.drive(self.velocity, self.vel, angular=self.correction_angle)
+
 
 def main(args=None):
     rclpy.init(args=args)
