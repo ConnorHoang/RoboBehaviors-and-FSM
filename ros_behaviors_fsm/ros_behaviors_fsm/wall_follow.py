@@ -45,15 +45,11 @@ class NeatoFsm(Node):
         """Primary loop"""
         self.drive(linear=0.0, angular=0.0)
 
-        if not self.stop:
-            self.drive(self.velocity, linear=0.5, angular=0.0)
-            sleep(0.1)
-
         match self.state:
             case "approach":
-                # Robot doesn't know the current location of a wall
-                # By default we drive forward until we get close enough
-                # to a wall
+                if not self.stop:
+                    self.drive(self.velocity, linear=0.15, angular=0.0)
+                    sleep(0.1)
                 pass
             case "wall_follow":
                 # Robot can detect a wall to the side
@@ -129,7 +125,7 @@ class NeatoFsm(Node):
             Turn right/left
         """
 
-        self.velocity
+        self.velocity = 
 
 
 def main(args=None):
