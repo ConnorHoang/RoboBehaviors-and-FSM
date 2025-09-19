@@ -50,15 +50,11 @@ class NeatoFsm(Node):
         """Primary loop"""
         self.drive(linear=0.0, angular=0.0)
 
-        if not self.stop:
-            self.drive(self.velocity, linear=0.5, angular=0.0)
-            sleep(0.1)
-
         match self.state:
             case "approach":
-                # Robot doesn't know the current location of a wall
-                # By default we drive forward until we get close enough
-                # to a wall
+                if not self.stop:
+                    self.drive(self.velocity, linear=0.15, angular=0.0)
+                    sleep(0.1)
                 pass
             case "wall_follow":
                 # Robot can detect a wall to the side
@@ -76,6 +72,8 @@ class NeatoFsm(Node):
             case _:
                 # Undefined state, throw an error
                 raise(ValueError(f"State {self.state} is not defined")) 
+            
+        self.vel_pub.publish(self.velocity)
 
     def process_scan(self, msg):
         """Check if distance from min to max angle from neato neato is less then target distance"""
@@ -121,6 +119,31 @@ class NeatoFsm(Node):
                            msg.right_side == 1):
             self.bumped.set()
             self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
+        
+    def turn(self):
+        """Turn state. Turn counterclockwise until Neato is ~parralel to wall on right and no wall in front
+        
+        Args:
+            msg (Twist()): 
+        Action:
+            Turn counterclockwise
+        """
+
+        self.drive(self.velocity, linear=0.0, angular=60.0)
+        sleep(0.1)
+
+    def wall_follow(self):
+        """
+        Drives in parralel to wall. Self-correcting by detecing distance wall on the right and turning to stay within range.
+
+        Args:
+            
+        Action;
+            Move foward
+            Turn right/left
+        """
+
+        pass
 
 def main(args=None):
     rclpy.init(args=args)
