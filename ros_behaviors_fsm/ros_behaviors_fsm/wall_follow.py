@@ -10,11 +10,13 @@ from geometry_msgs.msg import Twist
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import qos_profile_sensor_data
+from neato2_interfaces.msg import Bump
 
 class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
     def __init__(self):
         super().__init__('neato_fsm')
+        """Combine all below comments to actually decent docstring""" ##
         # the run_loop adjusts the robot's velocity based on latest laser data
         self.create_timer(0.1, self.run_loop)
         # Subscriber to intake laser sensor data
@@ -35,6 +37,9 @@ class NeatoFsm(Node):
         self.velocity = Twist()
         # bump boolean for physical sensor where True is bumped
         self.bumped = False
+        # subscribe to bump check
+        self.sub = self.create_subscription(Bump, "bump", self.process_bump, 10)
+
 
     def run_loop(self):
         """Primary loop"""
@@ -43,6 +48,8 @@ class NeatoFsm(Node):
         if not self.stop:
             self.drive(self.velocity, linear=0.5, angular=0.0)
             sleep(0.1)
+
+        self.publisher.publish(self.velocity)
 
     def process_scan(self, msg):
         """Check if distance in front of neato is less then target distance"""
@@ -59,7 +66,7 @@ class NeatoFsm(Node):
         Args:
             linear (_type_): the linear velocity in m/s
             angular (_type_): the angular velocity in radians/s
-        """        
+        """
         msg = msgArg
         msg.linear.x = linear
         msg.angular.z = angular
