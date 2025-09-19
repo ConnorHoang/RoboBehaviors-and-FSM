@@ -11,6 +11,7 @@ from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import qos_profile_sensor_data
 from neato2_interfaces.msg import Bump
+from threading import Thread, Event
 
 class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
@@ -37,9 +38,8 @@ class NeatoFsm(Node):
         self.velocity = Twist()
         # bump boolean for physical sensor where True is bumped
         self.bumped = False
-        # subscribe to bump check
-        self.sub = self.create_subscription(Bump, "bump", self.process_bump, 10)
-
+        # FSM state the robot is currently in
+        self.state = "approach"
 
     def run_loop(self):
         """Primary loop"""
@@ -49,8 +49,29 @@ class NeatoFsm(Node):
             self.drive(self.velocity, linear=0.5, angular=0.0)
             sleep(0.1)
 
-        self.publisher.publish(self.velocity)
-
+        match self.state:
+            case "approach":
+                # Robot doesn't know the current location of a wall
+                # By default we drive forward until we get close enough
+                # to a wall
+                pass
+            case "wall_follow":
+                # Robot can detect a wall to the side
+                # We should follow and make velocity adjustments to stay
+                # target distance from wall
+                pass
+            case "wall_turn":
+                # Robot can detect a wall in front (positive x direction)
+                # We should turn until the path ahead is clear
+                pass
+            case "bump":
+                # Bump sensor has been depressed
+                # We should stop moving immediately
+                pass
+            case _:
+                # Undefined state, throw an error
+                raise(ValueError(f"State {self.state} is not defined")) 
+    
     def process_scan(self, msg):
         """Check if distance in front of neato is less then target distance"""
         if msg.ranges[0] != 0.0:
@@ -66,7 +87,7 @@ class NeatoFsm(Node):
         Args:
             linear (_type_): the linear velocity in m/s
             angular (_type_): the angular velocity in radians/s
-        """
+        """        
         msg = msgArg
         msg.linear.x = linear
         msg.angular.z = angular
