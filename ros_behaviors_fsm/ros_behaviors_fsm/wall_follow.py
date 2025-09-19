@@ -71,6 +71,8 @@ class NeatoFsm(Node):
             case _:
                 # Undefined state, throw an error
                 raise(ValueError(f"State {self.state} is not defined")) 
+            
+        self.vel_pub.publish(self.velocity)
     
     def process_scan(self, msg):
         """Check if distance in front of neato is less then target distance"""
@@ -115,6 +117,20 @@ class NeatoFsm(Node):
 
         self.drive(self.velocity, linear=0.0, angular=60.0)
         sleep(0.1)
+
+    def wall_follow(self):
+        """
+        Drives in parralel to wall. Self-correcting by detecing distance wall on the right and turning to stay within range.
+
+        Args:
+            
+        Action;
+            Move foward
+            Turn right/left
+        """
+
+        self.velocity
+
 
 def main(args=None):
     rclpy.init(args=args)
