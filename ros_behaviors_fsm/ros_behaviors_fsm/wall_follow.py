@@ -13,6 +13,9 @@ from rclpy.qos import qos_profile_sensor_data
 from neato2_interfaces.msg import Bump
 from threading import Thread, Event
 
+# Default angle of sector to check lidar data, in rad
+DEFAULT_ANGLE_SWEEP = 0.5
+
 class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
     def __init__(self):
@@ -37,9 +40,11 @@ class NeatoFsm(Node):
         # velocity (speed and angle) of Neato
         self.velocity = Twist()
         # bump boolean for physical sensor where True is bumped
-        self.bumped = False
+        self.bumped = Event()
         # FSM state the robot is currently in
         self.state = "approach"
+        # Thread to process main loop logic
+        self.main_loop_thread = Thread(target=self.run_loop)
 
     def run_loop(self):
         """Primary loop"""
@@ -67,19 +72,29 @@ class NeatoFsm(Node):
             case "bump":
                 # Bump sensor has been depressed
                 # We should stop moving immediately
-                pass
+                self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
             case _:
                 # Undefined state, throw an error
                 raise(ValueError(f"State {self.state} is not defined")) 
-    
-    def process_scan(self, msg):
-        """Check if distance in front of neato is less then target distance"""
-        if msg.ranges[0] != 0.0:
-            #
-            if msg.ranges[0] < self.target_distance:
-                self.stop = True
 
-            print('scan received', msg.ranges[0])
+    def process_scan(self, msg):
+        """Check if distance from min to max angle from neato neato is less then target distance"""
+        self.scan_msg = msg
+
+    def get_scan_angle(self,min_angle=DEFAULT_ANGLE_SWEEP*-0.5, max_angle=DEFAULT_ANGLE_SWEEP*0.5):
+        """
+        Queries the most recent LIDAR scan data for nearest wall distance across a given swept angle
+        """
+        min_robot_angle = self.scan_msg.min_angle
+        max_robot_angle = self.scan_msg.max_angle
+        increment = self.scan_msg.angle_increment
+
+        min_dist = None
+        for range,index in enumerate(self.scan_msg.ranges):
+            if (min_angle < (min_robot_angle + index*increment) and max_angle > (min_robot_angle + index*increment)):
+                if (not min_dist or range < min_dist):
+                    min_dist = range
+        return min_dist
 
     def drive(self, msgArg, linear, angular):
         """Drive with the specified linear and angular velocity.
@@ -87,22 +102,25 @@ class NeatoFsm(Node):
         Args:
             linear (_type_): the linear velocity in m/s
             angular (_type_): the angular velocity in radians/s
-        """        
-        msg = msgArg
-        msg.linear.x = linear
-        msg.angular.z = angular
-        self.vel_pub.publish(msg)
+        """   
+        if not self.bumped.is_set():     
+            msg = msgArg
+            msg.linear.x = linear
+            msg.angular.z = angular
+            self.vel_pub.publish(msg)
 
     def process_bump(self, msg):
         """Callback for handling a bump sensor input."
         Input: 
             msg (Bump): a Bump type message from the subscriber.
         """
-        # Set the bump state to True if any part of the sensor is pressed
-        self.bumped = (msg.left_front == 1 or \
+        # Set the bump Event if any part of the sensor is pressed
+        if (msg.left_front == 1 or \
                            msg.right_front == 1 or \
                            msg.left_side == 1 or \
-                           msg.right_side == 1)
+                           msg.right_side == 1):
+            self.bumped.set()
+            self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
 
 def main(args=None):
     rclpy.init(args=args)
