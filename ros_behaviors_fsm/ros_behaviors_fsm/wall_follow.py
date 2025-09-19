@@ -4,6 +4,7 @@
 
 from time import sleep
 import rclpy
+import math
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from geometry_msgs.msg import Twist
@@ -14,7 +15,13 @@ from neato2_interfaces.msg import Bump
 from threading import Thread, Event
 
 # Default angle of sector to check lidar data, in rad
-DEFAULT_ANGLE_SWEEP = 0.5
+DEFAULT_ANGLE_SWEEP = 30 * math.pi / 180
+
+ANGLE_RIGHT_START = -115 * math.pi / 180
+ANGLE_RIGHT_END = -7 * math.pi / 180
+
+ANGLE_FRONT_START = -15 * math.pi / 180
+ANGLE_FRONT_END = 15 * math.pi / 180
 
 class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
@@ -50,21 +57,42 @@ class NeatoFsm(Node):
         """Primary loop"""
         self.drive(linear=0.0, angular=0.0)
 
+        dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
+        dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+
         match self.state:
             case "approach":
                 if not self.stop:
                     self.drive(self.velocity, linear=0.15, angular=0.0)
                     sleep(0.1)
-                pass
+                
+                if dist_front < self.target_distance:
+                    self.state = "turn"
+
             case "wall_follow":
                 # Robot can detect a wall to the side
                 # We should follow and make velocity adjustments to stay
                 # target distance from wall
-                pass
+                self.wall_follow(dist_front,dist_right)
+
+                if dist_front < self.target_distance:
+                    self.state = "turn"
+
+                if dist_right >= self.target_distance:
+                    self.state = "approach"
+
             case "wall_turn":
                 # Robot can detect a wall in front (positive x direction)
                 # We should turn until the path ahead is clear
-                pass
+                self.wall_turn(dist_front)
+
+                if dist_front >= self.target_distance:
+                    if dist_right < self.target_distance:
+                        self.state = "follow"
+                    else:
+                        self.state = "approach"
+
+
             case "bump":
                 # Bump sensor has been depressed
                 # We should stop moving immediately
@@ -118,6 +146,7 @@ class NeatoFsm(Node):
                            msg.left_side == 1 or \
                            msg.right_side == 1):
             self.bumped.set()
+            self.state = "bump"
             self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
         
     def turn(self):
