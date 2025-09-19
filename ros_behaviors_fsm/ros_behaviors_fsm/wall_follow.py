@@ -103,6 +103,18 @@ class NeatoFsm(Node):
                            msg.right_front == 1 or \
                            msg.left_side == 1 or \
                            msg.right_side == 1)
+        
+    def turn(self):
+        """Turn state. Turn counterclockwise until Neato is ~parralel to wall on right and no wall in front
+        
+        Args:
+            msg (Twist()): 
+        Action:
+            Turn counterclockwise
+        """
+
+        self.drive(self.velocity, linear=0.0, angular=60.0)
+        sleep(0.1)
 
 def main(args=None):
     rclpy.init(args=args)
