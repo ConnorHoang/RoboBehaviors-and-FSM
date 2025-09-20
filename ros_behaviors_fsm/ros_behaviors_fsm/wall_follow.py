@@ -32,18 +32,26 @@ class NeatoFsm(Node):
         self.create_timer(0.1, self.run_loop)
         # Subscriber to intake laser sensor data
         self.create_subscription(LaserScan, 'scan', self.process_scan, qos_profile=qos_profile_sensor_data)
+        # Subscriber to bump sensor data
+        self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
         # publisher to send Neato velocity to ROS space
         self.vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         # distance_to_obstacle is used to communciate laser data to run_loop
         self.distance_to_obstacle = None
         # Kp is the constant or to apply to the proportional error signal
-        self.Kp = 0.4
+        self.declare_parameters("Kp",0.4)
         # target_distance is the desired distance to the obstacle in front
-        self.target_distance = 1.2
+        self.declare_parameters("target_distance",1.2)
         # value to trigger stop in driving
         self.stop = False
-        # value for forward velocity of neato
-        self.vel = 0.1
+        # maximum allowable linear speed of Neato
+        self.declare_parameters("max_vel",0.2)
+        # minimum allowable linear speed of Neato during approach
+        self.declare_parameters("min_vel",0.03)
+        # Angular velocity correction to add/subtract when following wall
+        self.declare_parameter("angle_correction",0.1)
+        # Tolerance for drifting further/closer to wall when following
+        self.declare_parameter("angle_correction_tolerance",0.01)
         # velocity (speed and angle) of Neato
         self.velocity = Twist()
         # bump boolean for physical sensor where True is bumped
@@ -51,7 +59,7 @@ class NeatoFsm(Node):
         # FSM state the robot is currently in
         self.state = "approach"
         # array of last 5 distances to right wall
-        self.right_distance = []
+        self.right_distance_list = []
         # Thread to process main loop logic
         self.main_loop_thread = Thread(target=self.run_loop)
 
@@ -65,22 +73,27 @@ class NeatoFsm(Node):
         match self.state:
             case "approach":
                 if not self.stop:
-                    self.drive(self.velocity, linear=0.15, angular=0.0)
+                    # Approach velocity is proportional to distance from target dist from wall
+                    # Constrained between min_vel and max_vel
+                    approach_vel = self.get_parameter("Kp") * (dist_front - self.get_parameter("target_dist"))
+                    approach_vel = min(self.get_parameter("max_vel"),max(self.get_parameter("min_vel"),approach_vel))
+                    self.drive(self.velocity, linear=approach_vel, angular=0.0)
                     sleep(0.1)
                 
-                if dist_front < self.target_distance:
+                if dist_front < self.get_parameter("target_distance"):
                     self.state = "turn"
 
             case "wall_follow":
                 # Robot can detect a wall to the side
                 # We should follow and make velocity adjustments to stay
                 # target distance from wall
-                self.wall_follow(dist_front,dist_right)
+                dist_right_avg = sum(self.right_distance_list)/len(self.right_distance_list)
+                self.wall_follow(dist_front,dist_right,dist_right_avg)
 
-                if dist_front < self.target_distance:
+                if dist_front < self.get_parameter("target_distance"):
                     self.state = "turn"
 
-                if dist_right >= self.target_distance:
+                if dist_right >= self.get_parameter("target_distance"):
                     self.state = "approach"
 
             case "wall_turn":
@@ -88,8 +101,8 @@ class NeatoFsm(Node):
                 # We should turn until the path ahead is clear
                 self.wall_turn(dist_front)
 
-                if dist_front >= self.target_distance:
-                    if dist_right < self.target_distance:
+                if dist_front >= self.get_parameter("target_distance"):
+                    if dist_right < self.get_parameter("target_distance"):
                         self.state = "follow"
                     else:
                         self.state = "approach"
@@ -175,11 +188,12 @@ class NeatoFsm(Node):
             Turn right/left
         """
 
-        correction_increment = 0.1
+        correction_increment = self.get_parameter("angle_correction")
+        epsilon = self.get_parameter("angle_correction_tolerance")
 
-        if dist_front > dist_right_avg:
+        if dist_right > dist_right_avg - epsilon:
             self.correction_angle = self.correction_angle + correction_increment
-        elif dist_right < dist_right_avg:
+        elif dist_right < dist_right_avg + epsilon:
             self.correction_angle = self.correction_angle - correction_increment
 
         self.drive(self.velocity, self.vel, angular=self.correction_angle)
