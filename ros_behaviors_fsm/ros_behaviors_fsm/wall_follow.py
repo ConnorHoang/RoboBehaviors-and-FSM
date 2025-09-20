@@ -15,13 +15,13 @@ from neato2_interfaces.msg import Bump
 from threading import Thread, Event
 
 # Default angle of sector to check lidar data, in rad
-DEFAULT_ANGLE_SWEEP = 30 * math.pi / 180
+DEFAULT_ANGLE_SWEEP = 15 * math.pi / 180
 
-ANGLE_RIGHT_START = 75 * math.pi / 180
-ANGLE_RIGHT_END = 105 * math.pi / 180
+ANGLE_RIGHT_START = 85 * math.pi / 180
+ANGLE_RIGHT_END = 95 * math.pi / 180
 
-ANGLE_FRONT_START = -15 * math.pi / 180
-ANGLE_FRONT_END = 165 * math.pi / 180
+ANGLE_FRONT_START = 175 * math.pi / 180
+ANGLE_FRONT_END = 185 * math.pi / 180
 
 class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
@@ -41,13 +41,15 @@ class NeatoFsm(Node):
         # Kp is the constant or to apply to the proportional error signal
         self.declare_parameter("Kp",0.4)
         # target_distance is the desired distance to the obstacle in front
-        self.declare_parameter("target_distance",0.3)
+        self.declare_parameter("target_distance",1.0)
         # value to trigger stop in driving
         self.stop = False
         # maximum allowable linear speed of Neato
         self.declare_parameter("max_vel",0.2)
         # minimum allowable linear speed of Neato during approach
         self.declare_parameter("min_vel",0.03)
+        # Max allowable angular velocity
+        self.declare_parameter("max_ang_vel",0.5)
         # Angular velocity correction to add/subtract when following wall
         self.declare_parameter("angle_correction",0.1)
         # Tolerance for drifting further/closer to wall when following
@@ -139,7 +141,7 @@ class NeatoFsm(Node):
         min_dist = None
         for index,range in enumerate(self.scan_msg.ranges):
             print(f"checking range {range} at index {index}, angle = {min_robot_angle + index*increment}, min robot angle = {min_robot_angle}, inc = {increment}")
-            if (min_angle < (min_robot_angle + index*increment) and max_angle > (min_robot_angle + index*increment)):
+            if (min_angle < ((min_robot_angle + index*increment) % 360) and max_angle > ((min_robot_angle + index*increment) % 360)):
                 if (not min_dist or range < min_dist):
                     min_dist = range
         return min_dist
@@ -180,7 +182,7 @@ class NeatoFsm(Node):
             Turn counterclockwise
         """
 
-        self.drive(self.velocity, linear=0.0, angular=0.1)
+        self.drive(self.velocity, linear=0.0, angular=self.get_parameter("max_ang_vel").get_parameter_value().double_value)
         sleep(0.1)
 
     def wall_follow(self, dist_front, dist_right, dist_right_avg):
@@ -203,6 +205,7 @@ class NeatoFsm(Node):
         elif dist_right < dist_right_avg + epsilon:
             self.correction_angle = self.correction_angle - correction_increment
 
+        self.correction_angle = max(min(self.get_parameter("max_ang_vel").get_parameter_value().double_value,self.correction_angle),-1*self.get_parameter("max_ang_vel").get_parameter_value().double_value)
         self.drive(self.velocity, self.get_parameter("max_vel").get_parameter_value().double_value, angular=self.correction_angle)
 
 
