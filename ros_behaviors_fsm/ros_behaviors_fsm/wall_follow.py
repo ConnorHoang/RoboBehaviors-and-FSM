@@ -39,15 +39,15 @@ class NeatoFsm(Node):
         # distance_to_obstacle is used to communciate laser data to run_loop
         self.distance_to_obstacle = None
         # Kp is the constant or to apply to the proportional error signal
-        self.declare_parameters("Kp",0.4)
+        self.declare_parameter("Kp",0.4)
         # target_distance is the desired distance to the obstacle in front
-        self.declare_parameters("target_distance",1.2)
+        self.declare_parameter("target_distance",1.2)
         # value to trigger stop in driving
         self.stop = False
         # maximum allowable linear speed of Neato
-        self.declare_parameters("max_vel",0.2)
+        self.declare_parameter("max_vel",0.2)
         # minimum allowable linear speed of Neato during approach
-        self.declare_parameters("min_vel",0.03)
+        self.declare_parameter("min_vel",0.03)
         # Angular velocity correction to add/subtract when following wall
         self.declare_parameter("angle_correction",0.1)
         # Tolerance for drifting further/closer to wall when following
@@ -62,61 +62,64 @@ class NeatoFsm(Node):
         self.right_distance_list = []
         # Thread to process main loop logic
         self.main_loop_thread = Thread(target=self.run_loop)
+        # Last recorded LIDAR scan
+        self.scan_msg = None
 
     def run_loop(self):
         """Primary loop"""
-        self.drive(linear=0.0, angular=0.0)
+        self.drive(self.velocity, linear=0.0, angular=0.0)
 
-        dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
-        dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+        # Wait for the first LIDAR scan data before acting
+        if self.scan_msg:
+            dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
+            dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
 
-        match self.state:
-            case "approach":
-                if not self.stop:
-                    # Approach velocity is proportional to distance from target dist from wall
-                    # Constrained between min_vel and max_vel
-                    approach_vel = self.get_parameter("Kp") * (dist_front - self.get_parameter("target_dist"))
-                    approach_vel = min(self.get_parameter("max_vel"),max(self.get_parameter("min_vel"),approach_vel))
-                    self.drive(self.velocity, linear=approach_vel, angular=0.0)
-                    sleep(0.1)
-                
-                if dist_front < self.get_parameter("target_distance"):
-                    self.state = "turn"
+            match self.state:
+                case "approach":
+                    if not self.stop:
+                        # Approach velocity is proportional to distance from target dist from wall
+                        # Constrained between min_vel and max_vel
+                        approach_vel = self.get_parameter("Kp") * (dist_front - self.get_parameter("target_dist"))
+                        approach_vel = min(self.get_parameter("max_vel"),max(self.get_parameter("min_vel"),approach_vel))
+                        self.drive(self.velocity, linear=approach_vel, angular=0.0)
+                        sleep(0.1)
+                    
+                    if dist_front < self.get_parameter("target_distance"):
+                        self.state = "turn"
 
-            case "wall_follow":
-                # Robot can detect a wall to the side
-                # We should follow and make velocity adjustments to stay
-                # target distance from wall
-                dist_right_avg = sum(self.right_distance_list)/len(self.right_distance_list)
-                self.wall_follow(dist_front,dist_right,dist_right_avg)
+                case "wall_follow":
+                    # Robot can detect a wall to the side
+                    # We should follow and make velocity adjustments to stay
+                    # target distance from wall
+                    dist_right_avg = sum(self.right_distance_list)/len(self.right_distance_list)
+                    self.wall_follow(dist_front,dist_right,dist_right_avg)
 
-                if dist_front < self.get_parameter("target_distance"):
-                    self.state = "turn"
+                    if dist_front < self.get_parameter("target_distance"):
+                        self.state = "turn"
 
-                if dist_right >= self.get_parameter("target_distance"):
-                    self.state = "approach"
-
-            case "wall_turn":
-                # Robot can detect a wall in front (positive x direction)
-                # We should turn until the path ahead is clear
-                self.wall_turn(dist_front)
-
-                if dist_front >= self.get_parameter("target_distance"):
-                    if dist_right < self.get_parameter("target_distance"):
-                        self.state = "follow"
-                    else:
+                    if dist_right >= self.get_parameter("target_distance"):
                         self.state = "approach"
 
+                case "wall_turn":
+                    # Robot can detect a wall in front (positive x direction)
+                    # We should turn until the path ahead is clear
+                    self.wall_turn(dist_front)
 
-            case "bump":
-                # Bump sensor has been depressed
-                # We should stop moving immediately
-                self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
-            case _:
-                # Undefined state, throw an error
-                raise(ValueError(f"State {self.state} is not defined")) 
-            
-        self.vel_pub.publish(self.velocity)
+                    if dist_front >= self.get_parameter("target_distance"):
+                        if dist_right < self.get_parameter("target_distance"):
+                            self.state = "follow"
+                        else:
+                            self.state = "approach"
+
+                case "bump":
+                    # Bump sensor has been depressed
+                    # We should stop moving immediately
+                    self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
+                case _:
+                    # Undefined state, throw an error
+                    raise(ValueError(f"State {self.state} is not defined")) 
+                
+            self.vel_pub.publish(self.velocity)
 
     def process_scan(self, msg):
         """Check if distance from min to max angle from neato neato is less then target distance"""
