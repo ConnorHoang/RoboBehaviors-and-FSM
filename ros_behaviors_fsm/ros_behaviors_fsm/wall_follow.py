@@ -41,7 +41,7 @@ class NeatoFsm(Node):
         # Kp is the constant or to apply to the proportional error signal
         self.declare_parameter("Kp",0.4)
         # target_distance is the desired distance to the obstacle in front
-        self.declare_parameter("target_distance",1.2)
+        self.declare_parameter("target_distance",0.3)
         # value to trigger stop in driving
         self.stop = False
         # maximum allowable linear speed of Neato
@@ -64,6 +64,8 @@ class NeatoFsm(Node):
         self.main_loop_thread = Thread(target=self.run_loop)
         # Last recorded LIDAR scan
         self.scan_msg = None
+        # Angular velocity for adjusting wall distance
+        self.correction_angle = 0.0
 
     def run_loop(self):
         """Primary loop"""
@@ -73,41 +75,42 @@ class NeatoFsm(Node):
         if self.scan_msg:
             dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
             dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
-
+            print(f"state: {self.state}")
+            print(f"dist front: {dist_front}, dist right: {dist_right}\n")
             match self.state:
                 case "approach":
                     if not self.stop:
                         # Approach velocity is proportional to distance from target dist from wall
                         # Constrained between min_vel and max_vel
-                        approach_vel = self.get_parameter("Kp") * (dist_front - self.get_parameter("target_dist"))
-                        approach_vel = min(self.get_parameter("max_vel"),max(self.get_parameter("min_vel"),approach_vel))
+                        approach_vel = self.get_parameter("Kp").get_parameter_value().double_value * (dist_front - self.get_parameter("target_distance").get_parameter_value().double_value)
+                        approach_vel = min(self.get_parameter("max_vel").get_parameter_value().double_value,max(self.get_parameter("min_vel").get_parameter_value().double_value,approach_vel))
                         self.drive(self.velocity, linear=approach_vel, angular=0.0)
                         sleep(0.1)
                     
-                    if dist_front < self.get_parameter("target_distance"):
+                    if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
                         self.state = "turn"
 
                 case "wall_follow":
                     # Robot can detect a wall to the side
                     # We should follow and make velocity adjustments to stay
                     # target distance from wall
-                    dist_right_avg = sum(self.right_distance_list)/len(self.right_distance_list)
+                    dist_right_avg = sum(self.right_distance_list)/max(1,len(self.right_distance_list))
                     self.wall_follow(dist_front,dist_right,dist_right_avg)
 
-                    if dist_front < self.get_parameter("target_distance"):
+                    if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
                         self.state = "turn"
 
-                    if dist_right >= self.get_parameter("target_distance"):
+                    if dist_right >= self.get_parameter("target_distance").get_parameter_value().double_value:
                         self.state = "approach"
 
-                case "wall_turn":
+                case "turn":
                     # Robot can detect a wall in front (positive x direction)
                     # We should turn until the path ahead is clear
-                    self.wall_turn(dist_front)
+                    self.turn(dist_front)
 
-                    if dist_front >= self.get_parameter("target_distance"):
-                        if dist_right < self.get_parameter("target_distance"):
-                            self.state = "follow"
+                    if dist_front >= self.get_parameter("target_distance").get_parameter_value().double_value:
+                        if dist_right < self.get_parameter("target_distance").get_parameter_value().double_value:
+                            self.state = "wall_follow"
                         else:
                             self.state = "approach"
 
@@ -129,12 +132,13 @@ class NeatoFsm(Node):
         """
         Queries the most recent LIDAR scan data for nearest wall distance across a given swept angle
         """
-        min_robot_angle = self.scan_msg.min_angle
-        max_robot_angle = self.scan_msg.max_angle
+        min_robot_angle = self.scan_msg.angle_min
+        max_robot_angle = self.scan_msg.angle_max
         increment = self.scan_msg.angle_increment
 
         min_dist = None
-        for range,index in enumerate(self.scan_msg.ranges):
+        for index,range in enumerate(self.scan_msg.ranges):
+            #print(f"checking range {range} at index {index}")
             if (min_angle < (min_robot_angle + index*increment) and max_angle > (min_robot_angle + index*increment)):
                 if (not min_dist or range < min_dist):
                     min_dist = range
@@ -168,7 +172,7 @@ class NeatoFsm(Node):
             self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
         
     def turn(self, dist_front):
-        """Turn state. Turn counterclockwise until Neato is ~parralel to wall on right and no wall in front
+        """Turn state. Turn counterclockwise until Neato is ~parallel to wall on right and no wall in front
         
         Args:
             msg (Twist()): 
@@ -176,7 +180,7 @@ class NeatoFsm(Node):
             Turn counterclockwise
         """
 
-        self.drive(self.velocity, linear=0.0, angular=60.0)
+        self.drive(self.velocity, linear=0.0, angular=0.1)
         sleep(0.1)
 
     def wall_follow(self, dist_front, dist_right, dist_right_avg):
@@ -191,15 +195,15 @@ class NeatoFsm(Node):
             Turn right/left
         """
 
-        correction_increment = self.get_parameter("angle_correction")
-        epsilon = self.get_parameter("angle_correction_tolerance")
+        correction_increment = self.get_parameter("angle_correction").get_parameter_value().double_value
+        epsilon = self.get_parameter("angle_correction_tolerance").get_parameter_value().double_value
 
         if dist_right > dist_right_avg - epsilon:
             self.correction_angle = self.correction_angle + correction_increment
         elif dist_right < dist_right_avg + epsilon:
             self.correction_angle = self.correction_angle - correction_increment
 
-        self.drive(self.velocity, self.vel, angular=self.correction_angle)
+        self.drive(self.velocity, self.get_parameter("max_vel").get_parameter_value().double_value, angular=self.correction_angle)
 
 
 def main(args=None):
