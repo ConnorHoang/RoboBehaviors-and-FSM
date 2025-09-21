@@ -38,7 +38,7 @@ class NeatoFsm(Node):
         # Subscriber to intake laser sensor data
         self.create_subscription(LaserScan, 'scan', self.process_scan, qos_profile=qos_profile_sensor_data)
         # Subscriber to bump sensor data
-        #self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
+        self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
         # publisher to send Neato velocity to ROS space
         self.vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         # distance_to_obstacle is used to communciate laser data to run_loop
@@ -113,7 +113,6 @@ class NeatoFsm(Node):
     def run_loop(self):
         """Primary loop"""
         try:
-            self.drive(self.velocity, linear=0.0, angular=0.0)
             # Wait for the first LIDAR scan data before acting
             if self.scan_msg:
                 dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
@@ -284,7 +283,8 @@ class NeatoFsm(Node):
         print(f"integral: {self.integral}")
         control, error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], previous_error, self.integral, 1)
 
-        self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
+        self.correction_angle = control
+        #self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
         self.drive(self.velocity, self.max_vel, angular=self.correction_angle)
 
     def pid_controller(self, setpoint, pv, kp, ki, kd, previous_error, integral, dt):
