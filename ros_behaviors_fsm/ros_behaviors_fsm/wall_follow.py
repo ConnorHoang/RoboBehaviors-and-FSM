@@ -31,6 +31,7 @@ class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
     def __init__(self):
         super().__init__('neato_fsm')
+        self.add_on_set_parameters_callback(self.parameters_callback)
         """Combine all below comments to actually decent docstring""" ##
         # the run_loop adjusts the robot's velocity based on latest laser data
         self.create_timer(0.1, self.run_loop)
@@ -103,8 +104,6 @@ class NeatoFsm(Node):
         """Primary loop"""
         try:
             self.drive(self.velocity, linear=0.0, angular=0.0)
-            self.add_on_set_parameters_callback(self.parameters_callback)
-
             # Wait for the first LIDAR scan data before acting
             if self.scan_msg:
                 dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
