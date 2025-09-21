@@ -47,10 +47,10 @@ class NeatoFsm(Node):
         self.declare_parameter("Kp_drive",0.5)
         self.Kp_drive = self.get_parameter("Kp_drive").get_parameter_value().double_value
         # target_distance is the desired distance to the obstacle in front
-        self.declare_parameter("target_distance",1.0)
+        self.declare_parameter("target_distance",0.6)
         self.target_distance = self.get_parameter("target_distance").get_parameter_value().double_value
         # distance at which to register a wall to the right
-        self.declare_parameter("identify_wall_distance",1.2)
+        self.declare_parameter("identify_wall_distance",1.0)
         self.identify_wall_distance = self.get_parameter("identify_wall_distance").get_parameter_value().double_value
         # maximum allowable linear speed of Neato
         self.declare_parameter("max_vel",0.2)
@@ -280,11 +280,13 @@ class NeatoFsm(Node):
 
         previous_error = [x - target_dist for x in right_dist_list]
 
-        print(f"integral: {self.integral}")
         control, error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], previous_error, self.integral, 1)
 
         self.correction_angle = control
         #self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
+
+        print(f"control: {control}, correction_angle: {self.correction_angle}, integral: {self.integral}")
+
         self.drive(self.velocity, self.max_vel, angular=self.correction_angle)
 
     def pid_controller(self, setpoint, pv, kp, ki, kd, previous_error, integral, dt):
