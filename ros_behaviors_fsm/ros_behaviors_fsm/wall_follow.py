@@ -17,11 +17,11 @@ from threading import Thread, Event
 # Default angle of sector to check lidar data, in rad
 DEFAULT_ANGLE_SWEEP = 15 * math.pi / 180
 
-ANGLE_RIGHT_START = 85 * math.pi / 180
-ANGLE_RIGHT_END = 95 * math.pi / 180
+ANGLE_RIGHT_START = 80 * math.pi / 180
+ANGLE_RIGHT_END = 100 * math.pi / 180
 
-ANGLE_FRONT_START = 175 * math.pi / 180
-ANGLE_FRONT_END = 185 * math.pi / 180
+ANGLE_FRONT_START = 170 * math.pi / 180
+ANGLE_FRONT_END = 190 * math.pi / 180
 
 class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
@@ -39,7 +39,7 @@ class NeatoFsm(Node):
         # distance_to_obstacle is used to communciate laser data to run_loop
         self.distance_to_obstacle = None
         # Kp is the constant or to apply to the proportional error signal
-        self.declare_parameter("Kp",0.4)
+        self.declare_parameter("Kp",0.5)
         # target_distance is the desired distance to the obstacle in front
         self.declare_parameter("target_distance",1.0)
         # value to trigger stop in driving
@@ -47,7 +47,7 @@ class NeatoFsm(Node):
         # maximum allowable linear speed of Neato
         self.declare_parameter("max_vel",0.2)
         # minimum allowable linear speed of Neato during approach
-        self.declare_parameter("min_vel",0.03)
+        self.declare_parameter("min_vel",0.08)
         # Max allowable angular velocity
         self.declare_parameter("max_ang_vel",0.5)
         # Angular velocity correction to add/subtract when following wall
@@ -61,13 +61,15 @@ class NeatoFsm(Node):
         # FSM state the robot is currently in
         self.state = "approach"
         # array of last 5 distances to right wall
-        self.right_distance_list = []
+        self.err_list = [0.0, 0.0, 0.0, 0.0, 0.0]
         # Thread to process main loop logic
         self.main_loop_thread = Thread(target=self.run_loop)
         # Last recorded LIDAR scan
         self.scan_msg = None
         # Angular velocity for adjusting wall distance
         self.correction_angle = 0.0
+        # integral for PID
+        self.integral = 0
 
     def run_loop(self):
         """Primary loop"""
@@ -77,6 +79,8 @@ class NeatoFsm(Node):
         if self.scan_msg:
             dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
             dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+            self.err_list.pop(0)
+            self.err_list.append(dist_right)
             print(f"state: {self.state}")
             print(f"dist front: {dist_front}, dist right: {dist_right}\n")
             match self.state:
@@ -96,9 +100,8 @@ class NeatoFsm(Node):
                     # Robot can detect a wall to the side
                     # We should follow and make velocity adjustments to stay
                     # target distance from wall
-                    dist_right_avg = sum(self.right_distance_list)/max(1,len(self.right_distance_list))
-                    self.wall_follow(dist_front,dist_right,dist_right_avg)
-
+                    dist_right_avg = sum(self.err_list)/max(1,len(self.err_list))
+                    self.wall_follow(dist_front,dist_right,dist_right_avg,self.get_parameter("target_distance").get_parameter_value().double_value)
                     if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
                         self.state = "turn"
 
@@ -119,7 +122,7 @@ class NeatoFsm(Node):
                 case "bump":
                     # Bump sensor has been depressed
                     # We should stop moving immediately
-                    self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
+                    self.drive(self.velocity,linear=0.0,angular=0.0)
                 case _:
                     # Undefined state, throw an error
                     raise(ValueError(f"State {self.state} is not defined")) 
@@ -153,11 +156,10 @@ class NeatoFsm(Node):
             linear (_type_): the linear velocity in m/s
             angular (_type_): the angular velocity in radians/s
         """   
-        if not self.bumped.is_set():     
-            msg = msgArg
-            msg.linear.x = linear
-            msg.angular.z = angular
-            self.vel_pub.publish(msg)
+        msg = msgArg
+        msg.linear.x = linear
+        msg.angular.z = angular
+        self.vel_pub.publish(msg)
 
     def process_bump(self, msg):
         """Callback for handling a bump sensor input."
@@ -171,8 +173,8 @@ class NeatoFsm(Node):
                            msg.right_side == 1):
             self.bumped.set()
             self.state = "bump"
-            self.drive(self.velocity,linear=[0,0,0],angular=[0,0,0])
-        
+            self.drive(self.velocity,linear=0.0,angular=0.0)   
+
     def turn(self, dist_front):
         """Turn state. Turn counterclockwise until Neato is ~parallel to wall on right and no wall in front
         
@@ -185,7 +187,7 @@ class NeatoFsm(Node):
         self.drive(self.velocity, linear=0.0, angular=self.get_parameter("max_ang_vel").get_parameter_value().double_value)
         sleep(0.1)
 
-    def wall_follow(self, dist_front, dist_right, dist_right_avg):
+    def wall_follow(self, dist_front, dist_right, dist_right_avg, target_dist):
         """
         Drives in parralel to wall. Self-correcting by detecing distance wall on the right, comparing to average of previous times, 
         and turning to stay within range of wall. Tuning is important
@@ -197,17 +199,20 @@ class NeatoFsm(Node):
             Turn right/left
         """
 
-        correction_increment = self.get_parameter("angle_correction").get_parameter_value().double_value
-        epsilon = self.get_parameter("angle_correction_tolerance").get_parameter_value().double_value
+        previous_error = dist_right_avg - target_dist
 
-        if dist_right > dist_right_avg - epsilon:
-            self.correction_angle = self.correction_angle + correction_increment
-        elif dist_right < dist_right_avg + epsilon:
-            self.correction_angle = self.correction_angle - correction_increment
+        print(f"integral: {self.integral}")
+        control, error, self.integral = self.pid_controller(setpoint=target_dist, pv=dist_right, kp=0.1, ki=0, kd=0, previous_error=previous_error, integral=self.integral, dt=1)
 
-        self.correction_angle = max(min(self.get_parameter("max_ang_vel").get_parameter_value().double_value,self.correction_angle),-1*self.get_parameter("max_ang_vel").get_parameter_value().double_value)
+        self.correction_angle = max(min(self.get_parameter("max_ang_vel").get_parameter_value().double_value,control),-1*self.get_parameter("max_ang_vel").get_parameter_value().double_value)
         self.drive(self.velocity, self.get_parameter("max_vel").get_parameter_value().double_value, angular=self.correction_angle)
 
+    def pid_controller(self, setpoint, pv, kp, ki, kd, previous_error, integral, dt):
+        error = setpoint - pv
+        integral += error * dt
+        derivative = (error - previous_error) / dt
+        control = kp * error + ki * integral + kd * derivative
+        return control, error, integral
 
 def main(args=None):
     rclpy.init(args=args)
