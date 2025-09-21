@@ -17,11 +17,15 @@ from threading import Thread, Event
 # Default angle of sector to check lidar data, in rad
 DEFAULT_ANGLE_SWEEP = 15 * math.pi / 180
 
-ANGLE_RIGHT_START = 80 * math.pi / 180
-ANGLE_RIGHT_END = 100 * math.pi / 180
+ANGLE_RIGHT_START = 75 * math.pi / 180
+ANGLE_RIGHT_END = 105 * math.pi / 180
 
-ANGLE_FRONT_START = 170 * math.pi / 180
-ANGLE_FRONT_END = 190 * math.pi / 180
+ANGLE_FRONT_START = 165 * math.pi / 180
+ANGLE_FRONT_END = 195 * math.pi / 180
+
+WALL_MIN_PTS = 5
+
+WALL_SEARCH_TOLERANCE = 0.15
 
 class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
@@ -59,7 +63,7 @@ class NeatoFsm(Node):
         # bump boolean for physical sensor where True is bumped
         self.bumped = Event()
         # FSM state the robot is currently in
-        self.state = "approach"
+        self.state = "wall_search"
         # array of last 5 distances to right wall
         self.err_list = [0.0, 0.0, 0.0, 0.0, 0.0]
         # Thread to process main loop logic
@@ -119,6 +123,19 @@ class NeatoFsm(Node):
                         else:
                             self.state = "approach"
 
+                case "wall_search":
+                    # Robot cannot detect a wall in front of it
+                    # We query LIDAR data to find the direction of the nearest wall
+                    # If our 
+
+                    closest_dist,ccw = self.closest_wall_dist()
+
+                    self.turn(ccw=ccw)
+                    print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
+                    #sleep(0.1)
+                    if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
+                        self.state = "approach"
+
                 case "bump":
                     # Bump sensor has been depressed
                     # We should stop moving immediately
@@ -143,7 +160,7 @@ class NeatoFsm(Node):
 
         min_dist = None
         for index,range in enumerate(self.scan_msg.ranges):
-            print(f"checking range {range} at index {index}, angle = {min_robot_angle + index*increment}, min robot angle = {min_robot_angle}, inc = {increment}")
+            #print(f"checking range {range} at index {index}, angle = {min_robot_angle + index*increment}, min robot angle = {min_robot_angle}, inc = {increment}")
             if (min_angle < ((min_robot_angle + index*increment) % 360) and max_angle > ((min_robot_angle + index*increment) % 360)):
                 if (not min_dist or range < min_dist):
                     min_dist = range
@@ -175,7 +192,7 @@ class NeatoFsm(Node):
             self.state = "bump"
             self.drive(self.velocity,linear=0.0,angular=0.0)   
 
-    def turn(self, dist_front):
+    def turn(self, ccw=True):
         """Turn state. Turn counterclockwise until Neato is ~parallel to wall on right and no wall in front
         
         Args:
@@ -183,9 +200,40 @@ class NeatoFsm(Node):
         Action:
             Turn counterclockwise
         """
-
-        self.drive(self.velocity, linear=0.0, angular=self.get_parameter("max_ang_vel").get_parameter_value().double_value)
+        ccw = True
+        if ccw:
+            self.drive(self.velocity, linear=0.0, angular=self.get_parameter("max_ang_vel").get_parameter_value().double_value)
+        else:
+            self.drive(self.velocity, linear=0.0, angular=-1*self.get_parameter("max_ang_vel").get_parameter_value().double_value)
         sleep(0.1)
+
+    def closest_wall_dist(self):
+        """
+        Search last recorded scan data for the nearest wall. 
+        """
+        min_robot_angle = self.scan_msg.angle_min
+        max_robot_angle = self.scan_msg.angle_max
+        increment = self.scan_msg.angle_increment
+        
+        scan = self.scan_msg
+
+        min_wall_dist = None
+        min_wall_dist_index = None
+
+        for index,range in enumerate(self.scan_msg.ranges):
+            if index > math.floor((WALL_MIN_PTS - 1) * 0.5) and index + math.ceil((WALL_MIN_PTS - 1) * 0.5) < len(self.scan_msg.ranges):
+                wall_dist = max(self.scan_msg.ranges[index - math.floor((WALL_MIN_PTS - 1) * 0.5):index + 1 + math.ceil((WALL_MIN_PTS - 1)*0.5)])
+                #print(f"index {index}, range {range}, wall_dist = {wall_dist}, list = {self.scan_msg.ranges[index - math.floor((WALL_MIN_PTS - 1) * 0.5):index + 1 + math.ceil((WALL_MIN_PTS - 1)*0.5)]}")
+                if not min_wall_dist or wall_dist < min_wall_dist:
+                    min_wall_dist = wall_dist
+                    min_wall_dist_index = index
+        
+        if min_wall_dist_index > (len(self.scan_msg.ranges)*0.5):
+            ccw = False
+        else:
+            ccw = True
+
+        return self.scan_msg.ranges[min_wall_dist_index],ccw
 
     def wall_follow(self, dist_front, dist_right, dist_right_avg, target_dist):
         """
