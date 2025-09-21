@@ -49,6 +49,9 @@ class NeatoFsm(Node):
         # target_distance is the desired distance to the obstacle in front
         self.declare_parameter("target_distance",1.0)
         self.target_distance = self.get_parameter("target_distance").get_parameter_value().double_value
+        # distance at which to register a wall to the right
+        self.declare_parameter("identify_wall_distance",1.2)
+        self.identify_wall_distance = self.get_parameter("identify_wall_distance").get_parameter_value().double_array_value
         # maximum allowable linear speed of Neato
         self.declare_parameter("max_vel",0.2)
         self.max_vel = self.get_parameter("max_vel").get_parameter_value().double_value
@@ -79,7 +82,10 @@ class NeatoFsm(Node):
         # Angular velocity for adjusting wall distance
         self.correction_angle = 0.0
         # integral for PID
-        self.integral = 0
+        self.integral = 0 
+        # list of kp, ki, and kd coefficients for wall follow PID
+        self.declare_parameter("pid_controls",[0.1,0,0])
+        self.pid_controls = self.get_parameter("pid_controls").get_parameter_value().double_array_value
 
     def parameters_callback(self, params):
         """Callback for whenever a parameter is changed."""
@@ -98,6 +104,10 @@ class NeatoFsm(Node):
                 self.angle_correction = param.value
             elif param.name == "angle_correction_tolerance":
                 self.angle_correction_tolerance = param.value
+            elif param.name == "identify_wall_distance":
+                self.identify_wall_distance = param.value
+            elif param.name == "pid_controls":
+                self.pid_controls = param.value
         return SetParametersResult(successful=True)
 
     def run_loop(self):
@@ -128,12 +138,13 @@ class NeatoFsm(Node):
                     case "wall_follow":
                         # Robot can detect a wall to the side
                         # We should follow and make velocity adjustments to stay
-                        # target distance from wall
+                        # target distance from wall. If further than identify wall distance,
+                        # we've lost our wall --- go back to approach
                         self.wall_follow(dist_front,dist_right,self.right_dist_list,self.target_distance)
                         if dist_front < self.target_distance:
                             self.state = "turn"
 
-                        if dist_right >= self.target_distance:
+                        if dist_right >= self.identify_wall_distance:
                             self.state = "approach"
 
                     case "turn":
@@ -142,7 +153,7 @@ class NeatoFsm(Node):
                         self.turn(dist_front)
 
                         if dist_front >= self.target_distance:
-                            if dist_right < self.target_distance:
+                            if dist_right < self.identify_wall_distance:
                                 self.state = "wall_follow"
                             else:
                                 self.state = "approach"
@@ -271,7 +282,7 @@ class NeatoFsm(Node):
         previous_error = [x - target_dist for x in right_dist_list]
 
         print(f"integral: {self.integral}")
-        control, error, self.integral = self.pid_controller(target_dist, dist_right, 0.1, 0, 0, previous_error, self.integral, 1)
+        control, error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], previous_error, self.integral, 1)
 
         self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
         self.drive(self.velocity, self.max_vel, angular=self.correction_angle)
