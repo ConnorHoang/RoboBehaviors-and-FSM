@@ -51,7 +51,7 @@ class NeatoFsm(Node):
         self.target_distance = self.get_parameter("target_distance").get_parameter_value().double_value
         # distance at which to register a wall to the right
         self.declare_parameter("identify_wall_distance",1.2)
-        self.identify_wall_distance = self.get_parameter("identify_wall_distance").get_parameter_value().double_array_value
+        self.identify_wall_distance = self.get_parameter("identify_wall_distance").get_parameter_value().double_value
         # maximum allowable linear speed of Neato
         self.declare_parameter("max_vel",0.2)
         self.max_vel = self.get_parameter("max_vel").get_parameter_value().double_value
@@ -84,7 +84,7 @@ class NeatoFsm(Node):
         # integral for PID
         self.integral = 0 
         # list of kp, ki, and kd coefficients for wall follow PID
-        self.declare_parameter("pid_controls",[0.1,0,0])
+        self.declare_parameter("pid_controls",[0.1,0.0,0.0])
         self.pid_controls = self.get_parameter("pid_controls").get_parameter_value().double_array_value
 
     def parameters_callback(self, params):
