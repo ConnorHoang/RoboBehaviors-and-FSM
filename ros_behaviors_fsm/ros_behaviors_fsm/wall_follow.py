@@ -20,8 +20,8 @@ DEFAULT_ANGLE_SWEEP = 15 * math.pi / 180
 ANGLE_RIGHT_START = 75 * math.pi / 180
 ANGLE_RIGHT_END = 105 * math.pi / 180
 
-ANGLE_FRONT_START = 165 * math.pi / 180
-ANGLE_FRONT_END = 195 * math.pi / 180
+ANGLE_FRONT_START = 155 * math.pi / 180
+ANGLE_FRONT_END = 205 * math.pi / 180
 
 WALL_MIN_PTS = 5
 
@@ -37,7 +37,7 @@ class NeatoFsm(Node):
         # Subscriber to intake laser sensor data
         self.create_subscription(LaserScan, 'scan', self.process_scan, qos_profile=qos_profile_sensor_data)
         # Subscriber to bump sensor data
-        self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
+        #self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
         # publisher to send Neato velocity to ROS space
         self.vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         # distance_to_obstacle is used to communciate laser data to run_loop
@@ -77,74 +77,77 @@ class NeatoFsm(Node):
 
     def run_loop(self):
         """Primary loop"""
-        self.drive(self.velocity, linear=0.0, angular=0.0)
+        try:
+            self.drive(self.velocity, linear=0.0, angular=0.0)
 
-        # Wait for the first LIDAR scan data before acting
-        if self.scan_msg:
-            dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
-            dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
-            self.err_list.pop(0)
-            self.err_list.append(dist_right)
-            print(f"state: {self.state}")
-            print(f"dist front: {dist_front}, dist right: {dist_right}\n")
-            match self.state:
-                case "approach":
-                    if not self.stop:
-                        # Approach velocity is proportional to distance from target dist from wall
-                        # Constrained between min_vel and max_vel
-                        approach_vel = self.get_parameter("Kp").get_parameter_value().double_value * (dist_front - self.get_parameter("target_distance").get_parameter_value().double_value)
-                        approach_vel = min(self.get_parameter("max_vel").get_parameter_value().double_value,max(self.get_parameter("min_vel").get_parameter_value().double_value,approach_vel))
-                        self.drive(self.velocity, linear=approach_vel, angular=0.0)
-                        sleep(0.1)
-                    
-                    if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
-                        self.state = "turn"
+            # Wait for the first LIDAR scan data before acting
+            if self.scan_msg:
+                dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
+                dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+                self.err_list.pop(0)
+                self.err_list.append(dist_right)
+                print(f"state: {self.state}")
+                print(f"dist front: {dist_front}, dist right: {dist_right}\n")
+                match self.state:
+                    case "approach":
+                        if not self.stop:
+                            # Approach velocity is proportional to distance from target dist from wall
+                            # Constrained between min_vel and max_vel
+                            approach_vel = self.get_parameter("Kp").get_parameter_value().double_value * (dist_front - self.get_parameter("target_distance").get_parameter_value().double_value)
+                            approach_vel = min(self.get_parameter("max_vel").get_parameter_value().double_value,max(self.get_parameter("min_vel").get_parameter_value().double_value,approach_vel))
+                            self.drive(self.velocity, linear=approach_vel, angular=0.0)
+                            sleep(0.1)
+                        
+                        if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
+                            self.state = "turn"
 
-                case "wall_follow":
-                    # Robot can detect a wall to the side
-                    # We should follow and make velocity adjustments to stay
-                    # target distance from wall
-                    dist_right_avg = sum(self.err_list)/max(1,len(self.err_list))
-                    self.wall_follow(dist_front,dist_right,dist_right_avg,self.get_parameter("target_distance").get_parameter_value().double_value)
-                    if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
-                        self.state = "turn"
+                    case "wall_follow":
+                        # Robot can detect a wall to the side
+                        # We should follow and make velocity adjustments to stay
+                        # target distance from wall
+                        dist_right_avg = sum(self.err_list)/max(1,len(self.err_list))
+                        self.wall_follow(dist_front,dist_right,dist_right_avg,self.get_parameter("target_distance").get_parameter_value().double_value)
+                        if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
+                            self.state = "turn"
 
-                    if dist_right >= self.get_parameter("target_distance").get_parameter_value().double_value:
-                        self.state = "approach"
-
-                case "turn":
-                    # Robot can detect a wall in front (positive x direction)
-                    # We should turn until the path ahead is clear
-                    self.turn(dist_front)
-
-                    if dist_front >= self.get_parameter("target_distance").get_parameter_value().double_value:
-                        if dist_right < self.get_parameter("target_distance").get_parameter_value().double_value:
-                            self.state = "wall_follow"
-                        else:
+                        if dist_right >= self.get_parameter("target_distance").get_parameter_value().double_value:
                             self.state = "approach"
 
-                case "wall_search":
-                    # Robot cannot detect a wall in front of it
-                    # We query LIDAR data to find the direction of the nearest wall
-                    # If our 
+                    case "turn":
+                        # Robot can detect a wall in front (positive x direction)
+                        # We should turn until the path ahead is clear
+                        self.turn(dist_front)
 
-                    closest_dist,ccw = self.closest_wall_dist()
+                        if dist_front >= self.get_parameter("target_distance").get_parameter_value().double_value:
+                            if dist_right < self.get_parameter("target_distance").get_parameter_value().double_value:
+                                self.state = "wall_follow"
+                            else:
+                                self.state = "approach"
 
-                    self.turn(ccw=ccw)
-                    print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
-                    #sleep(0.1)
-                    if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
-                        self.state = "approach"
+                    case "wall_search":
+                        # Robot cannot detect a wall in front of it
+                        # We query LIDAR data to find the direction of the nearest wall
+                        # If our 
 
-                case "bump":
-                    # Bump sensor has been depressed
-                    # We should stop moving immediately
-                    self.drive(self.velocity,linear=0.0,angular=0.0)
-                case _:
-                    # Undefined state, throw an error
-                    raise(ValueError(f"State {self.state} is not defined")) 
-                
-            self.vel_pub.publish(self.velocity)
+                        closest_dist,ccw = self.closest_wall_dist()
+
+                        self.turn(ccw=ccw)
+                        print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
+                        #sleep(0.1)
+                        if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
+                            self.state = "approach"
+
+                    case "bump":
+                        # Bump sensor has been depressed
+                        # We should stop moving immediately
+                        self.drive(self.velocity,linear=0.0,angular=0.0)
+                    case _:
+                        # Undefined state, throw an error
+                        raise(ValueError(f"State {self.state} is not defined")) 
+                    
+                self.vel_pub.publish(self.velocity)
+        except KeyboardInterrupt:
+            self.drive(self.velocity,linear=0.0,angular=0.0)
 
     def process_scan(self, msg):
         """Check if distance from min to max angle from neato neato is less then target distance"""
@@ -210,20 +213,15 @@ class NeatoFsm(Node):
     def closest_wall_dist(self):
         """
         Search last recorded scan data for the nearest wall. 
+        To prvent sensor noise from registering an obstacle closer than there
+        is one, the maximum distance across WALL_MIN_PTS measurements is used
         """
-        min_robot_angle = self.scan_msg.angle_min
-        max_robot_angle = self.scan_msg.angle_max
-        increment = self.scan_msg.angle_increment
-        
-        scan = self.scan_msg
-
         min_wall_dist = None
         min_wall_dist_index = None
 
         for index,range in enumerate(self.scan_msg.ranges):
-            if index > math.floor((WALL_MIN_PTS - 1) * 0.5) and index + math.ceil((WALL_MIN_PTS - 1) * 0.5) < len(self.scan_msg.ranges):
-                wall_dist = max(self.scan_msg.ranges[index - math.floor((WALL_MIN_PTS - 1) * 0.5):index + 1 + math.ceil((WALL_MIN_PTS - 1)*0.5)])
-                #print(f"index {index}, range {range}, wall_dist = {wall_dist}, list = {self.scan_msg.ranges[index - math.floor((WALL_MIN_PTS - 1) * 0.5):index + 1 + math.ceil((WALL_MIN_PTS - 1)*0.5)]}")
+            if index >= WALL_MIN_PTS:
+                wall_dist = max(self.scan_msg.ranges[index-WALL_MIN_PTS:index])
                 if not min_wall_dist or wall_dist < min_wall_dist:
                     min_wall_dist = wall_dist
                     min_wall_dist_index = index
@@ -266,6 +264,7 @@ def main(args=None):
     rclpy.init(args=args)
     node = NeatoFsm()
     rclpy.spin(node)
+    node.drive(node.velocity,linear=0.0,angular=0.0)
     rclpy.shutdown()
 
 if __name__ == '__main__':
