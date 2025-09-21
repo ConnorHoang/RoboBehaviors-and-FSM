@@ -65,7 +65,7 @@ class NeatoFsm(Node):
         # FSM state the robot is currently in
         self.state = "wall_search"
         # array of last 5 distances to right wall
-        self.err_list = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self.right_dist_list = [0.0, 0.0, 0.0, 0.0, 0.0]
         # Thread to process main loop logic
         self.main_loop_thread = Thread(target=self.run_loop)
         # Last recorded LIDAR scan
@@ -84,8 +84,8 @@ class NeatoFsm(Node):
             if self.scan_msg:
                 dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
                 dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
-                self.err_list.pop(0)
-                self.err_list.append(dist_right)
+                self.right_dist_list.pop(0)
+                self.right_dist_list.append(dist_right)
                 print(f"state: {self.state}")
                 print(f"dist front: {dist_front}, dist right: {dist_right}\n")
                 match self.state:
@@ -105,8 +105,7 @@ class NeatoFsm(Node):
                         # Robot can detect a wall to the side
                         # We should follow and make velocity adjustments to stay
                         # target distance from wall
-                        dist_right_avg = sum(self.err_list)/max(1,len(self.err_list))
-                        self.wall_follow(dist_front,dist_right,dist_right_avg,self.get_parameter("target_distance").get_parameter_value().double_value)
+                        self.wall_follow(dist_front,dist_right,self.right_dist_list,self.get_parameter("target_distance").get_parameter_value().double_value)
                         if dist_front < self.get_parameter("target_distance").get_parameter_value().double_value:
                             self.state = "turn"
 
@@ -233,7 +232,7 @@ class NeatoFsm(Node):
 
         return self.scan_msg.ranges[min_wall_dist_index],ccw
 
-    def wall_follow(self, dist_front, dist_right, dist_right_avg, target_dist):
+    def wall_follow(self, dist_front, dist_right, right_dist_list, target_dist):
         """
         Drives in parralel to wall. Self-correcting by detecing distance wall on the right, comparing to average of previous times, 
         and turning to stay within range of wall. Tuning is important
@@ -245,10 +244,10 @@ class NeatoFsm(Node):
             Turn right/left
         """
 
-        previous_error = dist_right_avg - target_dist
+        previous_error = [x - target_dist for x in right_dist_list]
 
         print(f"integral: {self.integral}")
-        control, error, self.integral = self.pid_controller(setpoint=target_dist, pv=dist_right, kp=0.1, ki=0, kd=0, previous_error=previous_error, integral=self.integral, dt=1)
+        control, error, self.integral = self.pid_controller(target_dist, dist_right, 0.1, 0, 0, previous_error, self.integral, 1)
 
         self.correction_angle = max(min(self.get_parameter("max_ang_vel").get_parameter_value().double_value,control),-1*self.get_parameter("max_ang_vel").get_parameter_value().double_value)
         self.drive(self.velocity, self.get_parameter("max_vel").get_parameter_value().double_value, angular=self.correction_angle)
@@ -256,7 +255,7 @@ class NeatoFsm(Node):
     def pid_controller(self, setpoint, pv, kp, ki, kd, previous_error, integral, dt):
         error = setpoint - pv
         integral += error * dt
-        derivative = (error - previous_error) / dt
+        derivative = (error - max(previous_error)) / dt # remove max and fix later
         control = kp * error + ki * integral + kd * derivative
         return control, error, integral
 
