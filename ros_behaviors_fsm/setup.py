@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'ros_behaviors_fsm'
 
@@ -10,6 +12,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+	(os.path.join('share', package_name, 'launch'), glob('launch/*'))
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,7 +23,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'wall_follow = ros_behaviors_fsm.wall_follow:main'
+            'wall_follow = ros_behaviors_fsm.wall_follow:main',
+            'simple_teleop = ros_behaviors_fsm.simple_teleop:main'
         ],
     },
 )

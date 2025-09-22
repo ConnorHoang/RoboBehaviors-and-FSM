@@ -7,6 +7,7 @@ import rclpy
 import math
 from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
 from geometry_msgs.msg import Twist
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
@@ -33,6 +34,9 @@ class NeatoFsm(Node):
         super().__init__('neato_fsm')
         self.add_on_set_parameters_callback(self.parameters_callback)
         """Combine all below comments to actually decent docstring""" ##
+        self.use_teleop = True
+        # subscriber to see if we should listen to teleop
+        self.create_subscription(Bool,'use_teleop',self.teleop_callback,qos_profile=qos_profile_sensor_data)
         # the run_loop adjusts the robot's velocity based on latest laser data
         self.create_timer(0.1, self.run_loop)
         # Subscriber to intake laser sensor data
@@ -114,84 +118,91 @@ class NeatoFsm(Node):
 
     def run_loop(self):
         """Primary loop"""
-        try:
-            current_time = self.get_clock().now()
-            self.dt = (current_time - self.last_loop_time).nanoseconds / 1e9
-            self.last_loop_time = current_time
+        if self.use_teleop:
+            self.state = "wall_search"
+        else:
+            try:
+                current_time = self.get_clock().now()
+                self.dt = (current_time - self.last_loop_time).nanoseconds / 1e9
+                self.last_loop_time = current_time
+                # Wait for the first LIDAR scan data before acting
+                if self.scan_msg:
+                    dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
+                    dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+                    self.right_dist_list.pop(0)
+                    self.right_dist_list.append(dist_right)
+                    print(f"state: {self.state}")
+                    print(f"dist front: {dist_front}, dist right: {dist_right}\n")
+                    match self.state:
+                        case "approach":
+                            # Approach velocity is proportional to distance from target dist from wall
+                            # Constrained between min_vel and max_vel
+                            approach_vel = self.Kp_drive * (dist_front - self.target_distance)
+                            approach_vel = min(self.max_vel,max(self.min_vel,approach_vel))
+                            self.drive(self.velocity, linear=approach_vel, angular=0.0)
+                            print(f"linear_vel: {approach_vel}")
+                            sleep(0.1)
+                        
+                            if dist_front < self.target_distance:
+                                self.state = "turn"
 
-            # Wait for the first LIDAR scan data before acting
-            if self.scan_msg:
-                dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
-                dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
-                self.right_dist_list.pop(0)
-                self.right_dist_list.append(dist_right)
-                print(f"state: {self.state}")
-                print(f"dist front: {dist_front}, dist right: {dist_right}\n")
-                match self.state:
-                    case "approach":
-                        # Approach velocity is proportional to distance from target dist from wall
-                        # Constrained between min_vel and max_vel
-                        approach_vel = self.Kp_drive * (dist_front - self.target_distance)
-                        approach_vel = min(self.max_vel,max(self.min_vel,approach_vel))
-                        self.drive(self.velocity, linear=approach_vel, angular=0.0)
-                        print(f"linear_vel: {approach_vel}")
-                        sleep(0.1)
-                    
-                        if dist_front < self.target_distance:
-                            self.state = "turn"
+                        case "wall_follow":
+                            # Robot can detect a wall to the side
+                            # We should follow and make velocity adjustments to stay
+                            # target distance from wall. If further than identify wall distance,
+                            # we've lost our wall --- go back to approach
+                            self.wall_follow(dist_front,dist_right,self.right_dist_list,self.target_distance)
+                            if dist_front < self.target_distance:
+                                self.state = "turn"
 
-                    case "wall_follow":
-                        # Robot can detect a wall to the side
-                        # We should follow and make velocity adjustments to stay
-                        # target distance from wall. If further than identify wall distance,
-                        # we've lost our wall --- go back to approach
-                        self.wall_follow(dist_front,dist_right,self.right_dist_list,self.target_distance)
-                        if dist_front < self.target_distance:
-                            self.state = "turn"
-
-                        if dist_right >= self.identify_wall_distance:
-                            self.state = "approach"
-
-                    case "turn":
-                        # Robot can detect a wall in front (positive x direction)
-                        # We should turn until the path ahead is clear
-                        self.turn(dist_front)
-
-                        if dist_front >= self.target_distance:
-                            if dist_right < self.identify_wall_distance:
-                                self.state = "wall_follow"
-                            else:
+                            if dist_right >= self.identify_wall_distance:
                                 self.state = "approach"
 
-                    case "wall_search":
-                        # Robot cannot detect a wall in front of it
-                        # We query LIDAR data to find the direction of the nearest wall
-                        # If our 
+                        case "turn":
+                            # Robot can detect a wall in front (positive x direction)
+                            # We should turn until the path ahead is clear
+                            self.turn(dist_front)
 
-                        closest_dist,ccw = self.closest_wall_dist()
+                            if dist_front >= self.target_distance:
+                                if dist_right < self.identify_wall_distance:
+                                    self.state = "wall_follow"
+                                else:
+                                    self.state = "approach"
 
-                        self.turn(ccw=ccw)
-                        print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
-                        #sleep(0.1)
-                        if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
-                            self.reset_pid_state()
-                            self.state = "approach"
+                        case "wall_search":
+                            # Robot cannot detect a wall in front of it
+                            # We query LIDAR data to find the direction of the nearest wall
+                            # If our 
 
-                    case "bump":
-                        # Bump sensor has been depressed
-                        # We should stop moving immediately
-                        self.drive(self.velocity,linear=0.0,angular=0.0)
-                    case _:
-                        # Undefined state, throw an error
-                        raise(ValueError(f"State {self.state} is not defined")) 
-                    
-                self.vel_pub.publish(self.velocity)
-        except KeyboardInterrupt:
-            self.drive(self.velocity,linear=0.0,angular=0.0)
+                            closest_dist,ccw = self.closest_wall_dist()
+
+                            self.turn(ccw=ccw)
+                            print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
+                            #sleep(0.1)
+                            if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
+                                self.state = "approach"
+
+                        case "bump":
+                            # Bump sensor has been depressed
+                            # We should stop moving immediately
+                            self.drive(self.velocity,linear=0.0,angular=0.0)
+                        case _:
+                            # Undefined state, throw an error
+                            raise(ValueError(f"State {self.state} is not defined")) 
+                        
+                    self.vel_pub.publish(self.velocity)
+            except KeyboardInterrupt:
+                self.drive(self.velocity,linear=0.0,angular=0.0)
 
     def process_scan(self, msg):
         """Check if distance from min to max angle from neato neato is less then target distance"""
         self.scan_msg = msg
+
+    def teleop_callback(self, msg):
+        """
+        
+        """
+        self.use_teleop = msg.data
 
     def get_scan_angle(self,min_angle=DEFAULT_ANGLE_SWEEP*-0.5, max_angle=DEFAULT_ANGLE_SWEEP*0.5):
         """
