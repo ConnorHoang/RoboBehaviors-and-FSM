@@ -84,8 +84,10 @@ class NeatoFsm(Node):
         # integral for PID
         self.integral = 0 
         # list of kp, ki, and kd coefficients for wall follow PID
-        self.declare_parameter("pid_controls",[0.1,0.0,0.0])
+        self.declare_parameter("pid_controls",[0.5,0.0,0.0])
         self.pid_controls = self.get_parameter("pid_controls").get_parameter_value().double_array_value
+        # clock stuff for timer
+        self.last_loop_time = self.get_clock().now()
 
     def parameters_callback(self, params):
         """Callback for whenever a parameter is changed."""
@@ -113,6 +115,10 @@ class NeatoFsm(Node):
     def run_loop(self):
         """Primary loop"""
         try:
+            current_time = self.get_clock().now()
+            self.dt = (current_time - self.last_loop_time).nanoseconds / 1e9
+            self.last_loop_time = current_time
+
             # Wait for the first LIDAR scan data before acting
             if self.scan_msg:
                 dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
@@ -168,6 +174,7 @@ class NeatoFsm(Node):
                         print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
                         #sleep(0.1)
                         if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
+                            self.reset_pid_state()
                             self.state = "approach"
 
                     case "bump":
@@ -278,23 +285,42 @@ class NeatoFsm(Node):
             Turn right/left
         """
 
-        previous_error = [x - target_dist for x in right_dist_list]
+        if not hasattr(self, 'previous_error'):
+            self.previous_error = 0.0
 
-        control, error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], previous_error, self.integral, 1)
+        if not hasattr(self, 'previous_correction_angle'):
+            self.previous_correction_angle = 0.0
 
-        self.correction_angle = control
-        #self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
+        control, self.previous_error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
+        if self.dt > 0:
+            angular_acceleration = (self.correction_angle - self.previous_correction_angle) / self.dt
+        
+        self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
 
-        print(f"control: {control}, correction_angle: {self.correction_angle}, integral: {self.integral}")
-
+        print(f"error: {self.previous_error}, control: {control}, correction_angle: {self.correction_angle}, angular_acceleration: {angular_acceleration},  integral: {self.integral}")
+        
         self.drive(self.velocity, self.max_vel, angular=self.correction_angle)
 
     def pid_controller(self, setpoint, pv, kp, ki, kd, previous_error, integral, dt):
         error = setpoint - pv
+
         integral += error * dt
-        derivative = (error - max(previous_error)) / dt # remove max and fix later
+        max_integral = 1.0
+        integral = max(-max_integral, min(max_integral, integral)) # windup protection
+
+
+        if dt > 0.0:
+            derivative = (error - previous_error) / dt
+        else: 
+            derivative = 0.0
+
         control = kp * error + ki * integral + kd * derivative
         return control, error, integral
+
+    def reset_pid_state(self):
+        """Reset PID controller"""
+        self.previous_error = 0.0
+        self.integral = 0.0
 
 def main(args=None):
     rclpy.init(args=args)
