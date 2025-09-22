@@ -6,8 +6,6 @@ from rclpy.node import Node
 from geometry_msgs.msg import Twist, Vector3
 from std_msgs.msg import Bool
 from rclpy.qos import qos_profile_sensor_data
-from pynput.keyboard import Key, Listener, KeyCode
-
 import termios
 import tty
 import sys

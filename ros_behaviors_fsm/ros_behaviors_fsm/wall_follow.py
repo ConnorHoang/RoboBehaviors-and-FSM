@@ -9,6 +9,7 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import Bool
 from geometry_msgs.msg import Twist
+from visualization_msgs.msg import Marker, MarkerArray
 from rclpy.parameter import Parameter
 from rcl_interfaces.msg import SetParametersResult
 from rclpy.qos import qos_profile_sensor_data
@@ -42,7 +43,7 @@ class NeatoFsm(Node):
         # Subscriber to intake laser sensor data
         self.create_subscription(LaserScan, 'scan', self.process_scan, qos_profile=qos_profile_sensor_data)
         # Subscriber to bump sensor data
-        self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
+        #self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
         # publisher to send Neato velocity to ROS space
         self.vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
         # distance_to_obstacle is used to communciate laser data to run_loop
@@ -92,6 +93,8 @@ class NeatoFsm(Node):
         self.pid_controls = self.get_parameter("pid_controls").get_parameter_value().double_array_value
         # clock stuff for timer
         self.last_loop_time = self.get_clock().now()
+        # create publisher to visualize wall
+        self.wall_vis_pub = self.create_publisher(MarkerArray,'wall_marker', 10)
 
     def parameters_callback(self, params):
         """Callback for whenever a parameter is changed."""
@@ -127,12 +130,20 @@ class NeatoFsm(Node):
                 self.last_loop_time = current_time
                 # Wait for the first LIDAR scan data before acting
                 if self.scan_msg:
-                    dist_right = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
-                    dist_front = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+                    dist_right,angle_right,dist_right_list,angle_right_list = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
+                    dist_front,angle_front,dist_front_list,angle_front_list = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
                     self.right_dist_list.pop(0)
                     self.right_dist_list.append(dist_right)
                     print(f"state: {self.state}")
                     print(f"dist front: {dist_front}, dist right: {dist_right}\n")
+
+                    marker_arr = []
+                    for i in range(len(dist_front_list)):
+                        marker_arr.append(self.marker_from_lidar(dist_front_list[i],angle_front_list[i],i))
+                    arr_to_publish = MarkerArray()
+                    arr_to_publish.markers = marker_arr
+                    self.wall_vis_pub.publish(arr_to_publish)
+
                     match self.state:
                         case "approach":
                             # Approach velocity is proportional to distance from target dist from wall
@@ -194,6 +205,28 @@ class NeatoFsm(Node):
             except KeyboardInterrupt:
                 self.drive(self.velocity,linear=0.0,angular=0.0)
 
+    def marker_from_lidar(self,dist,angle,id):
+        """
+        
+        """
+        wall_marker = Marker()
+        wall_marker.header.frame_id = "base_laser_link"
+        wall_marker.header.stamp = self.get_clock().now().to_msg()
+        wall_marker.pose.position.x = math.cos(angle) * dist
+        wall_marker.pose.position.y = math.sin(angle) * dist
+        wall_marker.pose.position.z = 0.0
+        wall_marker.pose.orientation.z = math.tan(angle)
+        wall_marker.color.r = 1.0
+        wall_marker.color.g = 0.0
+        wall_marker.color.b = 0.0
+        wall_marker.color.a = 1.0
+        wall_marker.scale.x = 0.3
+        wall_marker.scale.y = 0.1
+        wall_marker.scale.z = 0.1
+        wall_marker.id = id
+        return wall_marker
+
+
     def process_scan(self, msg):
         """Check if distance from min to max angle from neato neato is less then target distance"""
         self.scan_msg = msg
@@ -213,12 +246,19 @@ class NeatoFsm(Node):
         increment = self.scan_msg.angle_increment
 
         min_dist = None
+        angle_min_dist = None
+        dist_arr = []
+        angle_arr = []
         for index,range in enumerate(self.scan_msg.ranges):
+            ray_angle = ((min_robot_angle + index*increment) % 360)
             #print(f"checking range {range} at index {index}, angle = {min_robot_angle + index*increment}, min robot angle = {min_robot_angle}, inc = {increment}")
-            if (min_angle < ((min_robot_angle + index*increment) % 360) and max_angle > ((min_robot_angle + index*increment) % 360)):
+            if (min_angle < ray_angle and max_angle > ray_angle):
+                dist_arr.append(range)
+                angle_arr.append(ray_angle)
                 if (not min_dist or range < min_dist):
                     min_dist = range
-        return min_dist
+                    angle_min_dist = ray_angle
+        return min_dist,angle_min_dist,dist_arr,angle_arr
 
     def drive(self, msgArg, linear, angular):
         """Drive with the specified linear and angular velocity.
