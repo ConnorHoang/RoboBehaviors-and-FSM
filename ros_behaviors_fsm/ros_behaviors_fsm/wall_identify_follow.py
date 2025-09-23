@@ -16,7 +16,7 @@ from rclpy.qos import qos_profile_sensor_data
 from neato2_interfaces.msg import Bump
 from threading import Thread, Event
 import numpy as np
-import sklearn.linear_model, sklearn.decomposition
+#import sklearn.linear_model, sklearn.decomposition
 
 # Default angle of sector to check lidar data, in rad
 DEFAULT_ANGLE_SWEEP = 15 * math.pi / 180
@@ -187,12 +187,12 @@ class NeatoFsm(Node):
                             # We query LIDAR data to find the direction of the nearest wall
                             # If our 
 
-                            closest_dist,ccw = self.closest_wall_dist()
+                            closest_dist_list,angle_list,ccw = self.closest_wall_dist()
 
                             self.turn(ccw=ccw)
-                            print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
+                            print(f"closest dist: {closest_dist_list}, dist front: {dist_front}, diff: {abs(closest_dist_list[0] - dist_front)}")
                             #sleep(0.1)
-                            if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
+                            if abs(closest_dist_list[0] - dist_front) < WALL_SEARCH_TOLERANCE:
                                 self.state = "approach"
 
                         case "bump":
@@ -211,8 +211,8 @@ class NeatoFsm(Node):
         """
         
         """
-        x_list = [r_list[i] * math.cos(theta_list[i]) for i in range(r_list)]
-        y_list = [r_list[i] * math.sin(theta_list[i]) for i in range(r_list)]
+        x_list = [r_list[i] * math.cos(theta_list[i]) for i in range(len(r_list))]
+        y_list = [r_list[i] * math.sin(theta_list[i]) for i in range(len(r_list))]
         return x_list,y_list
 
     def marker_from_lidar(self,dist,angle,id):
@@ -254,14 +254,34 @@ class NeatoFsm(Node):
         """
         data = np.column_stack([x_list, y_list])
 
-        pca = sklearn.decomposition.PCA(n_components=2)
-        pca.fit(data)
+        #pca = sklearn.decomposition.PCA(n_components=2)
+        #pca.fit(data)
 
-        mean = pca.mean_
-        components = pca.components_
+        #mean = pca.mean_
+        #components = pca.components_
 
-        pc1 = components[0,:]
-        pc2 = components[1,:]
+        ##############
+
+        # do pca using numpy svd rather than scikit learn
+
+        mean = data.mean(axis=0)
+        Q = data - mean
+        _, _, Vt = np.linalg.svd(Q, full_matrices=False)
+        t = Vt[0]                                   
+        pc1 = t / np.linalg.norm(t)
+        pc2 = np.array([-t[1], t[0]]) # pc2 is normal to pc1 
+
+        # normal should face the origin 
+
+        rho = float(pc2 @ mean)
+        if rho < 0.0:
+            pc2 = -pc2
+            rho = -rho
+
+        #############
+
+        #pc1 = components[0,:]
+        #pc2 = components[1,:]
 
         if np.dot(mean,pc2) > 0.0:
             pc2 *= -1
@@ -282,11 +302,22 @@ class NeatoFsm(Node):
         
         """
         length = 10
+
+        start_pt = Point()
+        start_pt.x = start[0]
+        start_pt.y = start[1]
+        start_pt.z = 0.0
+
+        end_pt = Point()
+        end_pt.x = start[0]+length*normal[0]
+        end_pt.y = start[1]+length*normal[1]
+        end_pt.z = 0.0
+
         wall_marker = Marker()
         wall_marker.header.frame_id = "base_laser_link"
         wall_marker.header.stamp = self.get_clock().now().to_msg()
-        wall_marker.points.append(Point([start[0],start[1],0.0]))
-        wall_marker.points.append(Point([start[0]+length*normal[0],start[1]+length*normal[1],0.0]))
+        wall_marker.points.append(start_pt)
+        wall_marker.points.append(end_pt)
         wall_marker.type = 4
         wall_marker.color.r = 1.0
         wall_marker.color.g = 0.0
@@ -370,9 +401,9 @@ class NeatoFsm(Node):
         min_wall_dist_index = None
         ray_angle_list = []
 
-        for index,range in enumerate(self.scan_msg.ranges):
+        for index,dist in enumerate(self.scan_msg.ranges):
             ray_angle = ((self.scan_msg.angle_min + index*self.scan_msg.angle_increment) % 360)
-            if not (angle_start and angle_end):
+            if (angle_end is not None) and (angle_start is not None):
                 if ray_angle < angle_start or ray_angle > angle_end:
                     continue
             if index >= WALL_MIN_PTS:
@@ -386,7 +417,7 @@ class NeatoFsm(Node):
         else:
             ccw = True
 
-        for i in range(min_wall_dist_index-WALL_MIN_PTS,min_wall_dist_index):
+        for i in range(int(min_wall_dist_index-WALL_MIN_PTS),int(min_wall_dist_index)):
             ray_angle_list.append(((self.scan_msg.angle_min + index*self.scan_msg.angle_increment) % 360))
 
         return self.scan_msg.ranges[min_wall_dist_index-WALL_MIN_PTS:min_wall_dist_index],ray_angle_list,ccw
