@@ -1,0 +1,484 @@
+""" This node uses the laser scan measurement pointing straight ahead from
+    the robot and compares it to a desired set distance.  The forward velocity
+    of the robot is adjusted until the robot achieves the desired distance """
+
+from time import sleep
+import rclpy
+import math
+from rclpy.node import Node
+from sensor_msgs.msg import LaserScan
+from std_msgs.msg import Bool
+from geometry_msgs.msg import Twist, Point
+from visualization_msgs.msg import Marker, MarkerArray
+from rclpy.parameter import Parameter
+from rcl_interfaces.msg import SetParametersResult
+from rclpy.qos import qos_profile_sensor_data
+from neato2_interfaces.msg import Bump
+from threading import Thread, Event
+import numpy as np
+import sklearn.linear_model, sklearn.decomposition
+
+# Default angle of sector to check lidar data, in rad
+DEFAULT_ANGLE_SWEEP = 15 * math.pi / 180
+
+ANGLE_RIGHT_START = 75 * math.pi / 180
+ANGLE_RIGHT_END = 105 * math.pi / 180
+
+ANGLE_FRONT_START = 155 * math.pi / 180
+ANGLE_FRONT_END = 205 * math.pi / 180
+
+WALL_MIN_PTS = 5
+
+WALL_SEARCH_TOLERANCE = 0.15
+
+class NeatoFsm(Node):
+    """ This class wraps the basic functionality of the node """
+    def __init__(self):
+        super().__init__('neato_fsm')
+        self.add_on_set_parameters_callback(self.parameters_callback)
+        """Combine all below comments to actually decent docstring""" ##
+        self.use_teleop = True
+        # subscriber to see if we should listen to teleop
+        self.create_subscription(Bool,'use_teleop',self.teleop_callback,qos_profile=qos_profile_sensor_data)
+        # the run_loop adjusts the robot's velocity based on latest laser data
+        self.create_timer(0.1, self.run_loop)
+        # Subscriber to intake laser sensor data
+        self.create_subscription(LaserScan, 'scan', self.process_scan, qos_profile=qos_profile_sensor_data)
+        # Subscriber to bump sensor data
+        #self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
+        # publisher to send Neato velocity to ROS space
+        self.vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        # distance_to_obstacle is used to communciate laser data to run_loop
+        self.distance_to_obstacle = None
+        # Kp is the constant or to apply to the proportional error signal
+        self.declare_parameter("Kp_drive",0.5)
+        self.Kp_drive = self.get_parameter("Kp_drive").get_parameter_value().double_value
+        # target_distance is the desired distance to the obstacle in front
+        self.declare_parameter("target_distance",0.6)
+        self.target_distance = self.get_parameter("target_distance").get_parameter_value().double_value
+        # distance at which to register a wall to the right
+        self.declare_parameter("identify_wall_distance",1.0)
+        self.identify_wall_distance = self.get_parameter("identify_wall_distance").get_parameter_value().double_value
+        # maximum allowable linear speed of Neato
+        self.declare_parameter("max_vel",0.2)
+        self.max_vel = self.get_parameter("max_vel").get_parameter_value().double_value
+        # minimum allowable linear speed of Neato during approach
+        self.declare_parameter("min_vel",0.08)
+        self.min_vel = self.get_parameter("min_vel").get_parameter_value().double_value
+        # Max allowable angular velocity
+        self.declare_parameter("max_ang_vel",0.5)
+        self.max_ang_vel = self.get_parameter("max_ang_vel").get_parameter_value().double_value
+        # Angular velocity correction to add/subtract when following wall
+        self.declare_parameter("angle_correction",0.1)
+        self.angle_correction = self.get_parameter("angle_correction").get_parameter_value().double_value
+        # Tolerance for drifting further/closer to wall when following
+        self.declare_parameter("angle_correction_tolerance",0.01)
+        self.angle_correction_tolerance = self.get_parameter("angle_correction_tolerance").get_parameter_value().double_value
+        # velocity (speed and angle) of Neato
+        self.velocity = Twist()
+        # bump boolean for physical sensor where True is bumped
+        self.bumped = Event()
+        # FSM state the robot is currently in
+        self.state = "approach" ### Change to be "wall_search"
+        # array of last 5 distances to right wall
+        self.right_dist_list = [0.0, 0.0, 0.0, 0.0, 0.0]
+        # Thread to process main loop logic
+        self.main_loop_thread = Thread(target=self.run_loop)
+        # Last recorded LIDAR scan
+        self.scan_msg = None
+        # Angular velocity for adjusting wall distance
+        self.correction_angle = 0.0
+        # integral for PID
+        self.integral = 0 
+        # list of kp, ki, and kd coefficients for wall follow PID
+        self.declare_parameter("pid_controls",[0.5,0.0,0.0])
+        self.pid_controls = self.get_parameter("pid_controls").get_parameter_value().double_array_value
+        # clock stuff for timer
+        self.last_loop_time = self.get_clock().now()
+        # create publisher to visualize wall
+        self.wall_vis_pub = self.create_publisher(MarkerArray,'wall_marker', 10)
+
+    def parameters_callback(self, params):
+        """Callback for whenever a parameter is changed."""
+        for param in params:
+            if param.name == "Kp_drive":
+                self.Kp_drive = param.value
+            elif param.name == "target_distance":
+                self.target_distance = param.value
+            elif param.name == "max_vel":
+                self.max_vel = param.value
+            elif param.name == "min_vel":
+                self.min_vel = param.value
+            elif param.name == "max_ang_vel":
+                self.max_ang_vel = param.value
+            elif param.name == "angle_correction":
+                self.angle_correction = param.value
+            elif param.name == "angle_correction_tolerance":
+                self.angle_correction_tolerance = param.value
+            elif param.name == "identify_wall_distance":
+                self.identify_wall_distance = param.value
+            elif param.name == "pid_controls":
+                self.pid_controls = param.value
+        return SetParametersResult(successful=True)
+
+    def run_loop(self):
+        """Primary loop"""
+        if self.use_teleop:
+            self.state = "wall_search"
+        else:
+            try:
+                current_time = self.get_clock().now()
+                self.dt = (current_time - self.last_loop_time).nanoseconds / 1e9
+                self.last_loop_time = current_time
+                # Wait for the first LIDAR scan data before acting
+                if self.scan_msg:
+                    dist_right,angle_right,dist_right_list,angle_right_list = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
+                    dist_front,angle_front,dist_front_list,angle_front_list = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+                    self.right_dist_list.pop(0)
+                    self.right_dist_list.append(dist_right)
+                    print(f"state: {self.state}")
+                    print(f"dist front: {dist_front}, dist right: {dist_right}\n")
+
+                    marker_arr = []
+                    for i in range(len(dist_front_list)):
+                        marker_arr.append(self.marker_from_lidar(dist_front_list[i],angle_front_list[i],i))
+                    arr_to_publish = MarkerArray()
+                    arr_to_publish.markers = marker_arr
+                    self.wall_vis_pub.publish(arr_to_publish)
+
+                    match self.state:
+                        case "approach":
+                            # Approach velocity is proportional to distance from target dist from wall
+                            # Constrained between min_vel and max_vel
+                            approach_vel = self.Kp_drive * (dist_front - self.target_distance)
+                            approach_vel = min(self.max_vel,max(self.min_vel,approach_vel))
+                            self.drive(self.velocity, linear=approach_vel, angular=0.0)
+                            print(f"linear_vel: {approach_vel}")
+                            sleep(0.1)
+                        
+                            if dist_front < self.target_distance:
+                                self.state = "turn"
+
+                        case "wall_follow":
+                            # Robot can detect a wall to the side
+                            # We should follow and make velocity adjustments to stay
+                            # target distance from wall. If further than identify wall distance,
+                            # we've lost our wall --- go back to approach
+                            self.wall_follow(dist_front,dist_right,self.right_dist_list,self.target_distance)
+                            if dist_front < self.target_distance:
+                                self.state = "turn"
+
+                            if dist_right >= self.identify_wall_distance:
+                                self.state = "approach"
+
+                        case "turn":
+                            # Robot can detect a wall in front (positive x direction)
+                            # We should turn until the path ahead is clear
+                            self.turn(dist_front)
+
+                            if dist_front >= self.target_distance:
+                                if dist_right < self.identify_wall_distance:
+                                    self.state = "wall_follow"
+                                else:
+                                    self.state = "approach"
+
+                        case "wall_search":
+                            # Robot cannot detect a wall in front of it
+                            # We query LIDAR data to find the direction of the nearest wall
+                            # If our 
+
+                            closest_dist,ccw = self.closest_wall_dist()
+
+                            self.turn(ccw=ccw)
+                            print(f"closest dist: {closest_dist}, dist front: {dist_front}, diff: {abs(closest_dist - dist_front)}")
+                            #sleep(0.1)
+                            if abs(closest_dist - dist_front) < WALL_SEARCH_TOLERANCE:
+                                self.state = "approach"
+
+                        case "bump":
+                            # Bump sensor has been depressed
+                            # We should stop moving immediately
+                            self.drive(self.velocity,linear=0.0,angular=0.0)
+                        case _:
+                            # Undefined state, throw an error
+                            raise(ValueError(f"State {self.state} is not defined")) 
+                        
+                    self.vel_pub.publish(self.velocity)
+            except KeyboardInterrupt:
+                self.drive(self.velocity,linear=0.0,angular=0.0)
+
+    def polar_to_cartesian(self,r_list,theta_list):
+        """
+        
+        """
+        x_list = [r_list[i] * math.cos(theta_list[i]) for i in range(r_list)]
+        y_list = [r_list[i] * math.sin(theta_list[i]) for i in range(r_list)]
+        return x_list,y_list
+
+    def marker_from_lidar(self,dist,angle,id):
+        """
+        
+        """
+        wall_marker = Marker()
+        wall_marker.header.frame_id = "base_laser_link"
+        wall_marker.header.stamp = self.get_clock().now().to_msg()
+        wall_marker.pose.position.x = math.cos(angle) * dist
+        wall_marker.pose.position.y = math.sin(angle) * dist
+        wall_marker.pose.position.z = 0.0
+        wall_marker.pose.orientation.z = math.tan(angle)
+        wall_marker.color.r = 1.0
+        wall_marker.color.g = 0.0
+        wall_marker.color.b = 0.0
+        wall_marker.color.a = 1.0
+        wall_marker.scale.x = 0.3
+        wall_marker.scale.y = 0.1
+        wall_marker.scale.z = 0.1
+        wall_marker.id = id
+        return wall_marker
+
+
+    def process_scan(self, msg):
+        """Check if distance from min to max angle from neato neato is less then target distance"""
+        self.scan_msg = msg
+
+    def teleop_callback(self, msg):
+        """
+        
+        """
+        self.use_teleop = msg.data
+
+    def wall_identify(self, x_list,y_list):
+        """
+        Identify the shape of a wall by sampling points radially close to the closest
+        point and fitting a line to those points. 
+        """
+        data = np.column_stack([x_list, y_list])
+
+        pca = sklearn.decomposition.PCA(n_components=2)
+        pca.fit(data)
+
+        mean = pca.mean_
+        components = pca.components_
+
+        pc1 = components[0,:]
+        pc2 = components[1,:]
+
+        if np.dot(mean,pc2) > 0.0:
+            pc2 *= -1
+
+        mean_target = mean + self.target_distance * pc2
+
+        wall_line_marker = self.make_line_marker(mean,pc1)
+        wall_target_marker = self.make_line_marker(mean_target,pc1)
+
+        err_linear = np.dot(mean,pc2) # linear distance of neato from wall
+        angle_wall = np.atan2(pc1[1],pc1[0])
+        err_angular = angle_wall
+
+        return err_linear,err_angular,wall_line_marker,wall_target_marker
+
+    def make_line_marker(self,start,normal):
+        """
+        
+        """
+        length = 10
+        wall_marker = Marker()
+        wall_marker.header.frame_id = "base_laser_link"
+        wall_marker.header.stamp = self.get_clock().now().to_msg()
+        wall_marker.points.append(Point([start[0],start[1],0.0]))
+        wall_marker.points.append(Point([start[0]+length*normal[0],start[1]+length*normal[1],0.0]))
+        wall_marker.type = 4
+        wall_marker.color.r = 1.0
+        wall_marker.color.g = 0.0
+        wall_marker.color.b = 0.0
+        wall_marker.color.a = 1.0
+        wall_marker.scale.x = 0.3
+        wall_marker.id = 0
+        return wall_marker
+
+    def get_scan_angle(self,min_angle=DEFAULT_ANGLE_SWEEP*-0.5, max_angle=DEFAULT_ANGLE_SWEEP*0.5):
+        """
+        Queries the most recent LIDAR scan data for nearest wall distance across a given swept angle
+        """
+        min_robot_angle = self.scan_msg.angle_min
+        max_robot_angle = self.scan_msg.angle_max
+        increment = self.scan_msg.angle_increment
+
+        min_dist = None
+        angle_min_dist = None
+        dist_arr = []
+        angle_arr = []
+        for index,range in enumerate(self.scan_msg.ranges):
+            ray_angle = ((min_robot_angle + index*increment) % 360)
+            #print(f"checking range {range} at index {index}, angle = {min_robot_angle + index*increment}, min robot angle = {min_robot_angle}, inc = {increment}")
+            if (min_angle < ray_angle and max_angle > ray_angle):
+                dist_arr.append(range)
+                angle_arr.append(ray_angle)
+                if (not min_dist or range < min_dist):
+                    min_dist = range
+                    angle_min_dist = ray_angle
+        return min_dist,angle_min_dist,dist_arr,angle_arr
+
+    def drive(self, msgArg, linear, angular):
+        """Drive with the specified linear and angular velocity.
+
+        Args:
+            linear (_type_): the linear velocity in m/s
+            angular (_type_): the angular velocity in radians/s
+        """   
+        msg = msgArg
+        msg.linear.x = linear
+        msg.angular.z = angular
+        self.vel_pub.publish(msg)
+
+    def process_bump(self, msg):
+        """Callback for handling a bump sensor input."
+        Input: 
+            msg (Bump): a Bump type message from the subscriber.
+        """
+        # Set the bump Event if any part of the sensor is pressed
+        if (msg.left_front == 1 or \
+                           msg.right_front == 1 or \
+                           msg.left_side == 1 or \
+                           msg.right_side == 1):
+            self.bumped.set()
+            self.state = "bump"
+            self.drive(self.velocity,linear=0.0,angular=0.0)   
+
+    def turn(self, ccw=True):
+        """Turn state. Turn counterclockwise until Neato is ~parallel to wall on right and no wall in front
+        
+        Args:
+            msg (Twist()): 
+        Action:
+            Turn counterclockwise
+        """
+        ccw = True
+        if ccw:
+            self.drive(self.velocity, linear=0.0, angular=self.max_ang_vel)
+        else:
+            self.drive(self.velocity, linear=0.0, angular=-1*self.max_ang_vel)
+        sleep(0.1)
+
+    def closest_wall_dist(self,angle_start=None,angle_end=None):
+        """
+        Search last recorded scan data for the nearest wall. 
+        To prvent sensor noise from registering an obstacle closer than there
+        is one, the maximum distance across WALL_MIN_PTS measurements is used
+        """
+        min_wall_dist = None
+        min_wall_dist_index = None
+        ray_angle_list = []
+
+        for index,range in enumerate(self.scan_msg.ranges):
+            ray_angle = ((self.scan_msg.angle_min + index*self.scan_msg.angle_increment) % 360)
+            if not (angle_start and angle_end):
+                if ray_angle < angle_start or ray_angle > angle_end:
+                    continue
+            if index >= WALL_MIN_PTS:
+                wall_dist = max(self.scan_msg.ranges[index-WALL_MIN_PTS:index])
+                if not min_wall_dist or wall_dist < min_wall_dist:
+                    min_wall_dist = wall_dist
+                    min_wall_dist_index = index
+        
+        if min_wall_dist_index > (len(self.scan_msg.ranges)*0.5):
+            ccw = False
+        else:
+            ccw = True
+
+        for i in range(min_wall_dist_index-WALL_MIN_PTS,min_wall_dist_index):
+            ray_angle_list.append(((self.scan_msg.angle_min + index*self.scan_msg.angle_increment) % 360))
+
+        return self.scan_msg.ranges[min_wall_dist_index-WALL_MIN_PTS:min_wall_dist_index],ray_angle_list,ccw
+
+    def wall_follow(self, dist_front, dist_right, right_dist_list, target_dist):
+        """
+        Drives in parralel to wall. Self-correcting by detecing distance wall on the right, comparing to average of previous times, 
+        and turning to stay within range of wall. Tuning is important
+
+        Args:
+            
+        Action;
+            Move foward
+            Turn right/left
+        """
+
+        if not hasattr(self, 'previous_error'):
+            self.previous_error = 0.0
+
+        if not hasattr(self, 'previous_correction_angle'):
+            self.previous_correction_angle = 0.0
+
+        ### Currently just try to identify a wall on the right side
+        dist_list,angle_list,_ = self.closest_wall_dist(angle_start=ANGLE_RIGHT_START,angle_end=ANGLE_RIGHT_END)
+        x_list,y_list = self.polar_to_cartesian(dist_list,angle_list)
+        err_linear,err_angular,marker_wall,marker_target = self.wall_identify(x_list,y_list)
+
+        # currently just manually encoding linear error here, sign could be off
+        control, self.previous_error, self.integral = self.pid_controller(target_dist, target_dist + err_linear, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
+        
+        # old error calculation:
+        #control, self.previous_error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
+        if self.dt > 0:
+            angular_acceleration = (self.correction_angle - self.previous_correction_angle) / self.dt
+        
+        self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
+
+        print(f"error: {self.previous_error}, control: {control}, correction_angle: {self.correction_angle}, angular_acceleration: {angular_acceleration},  integral: {self.integral}")
+        
+        self.drive(self.velocity, self.max_vel, angular=self.correction_angle)
+
+    def pid_controller(self, setpoint, pv, kp, ki, kd, previous_error, integral, dt):
+        error = setpoint - pv
+
+        integral += error * dt
+        max_integral = 1.0
+        integral = max(-max_integral, min(max_integral, integral)) # windup protection
+
+
+        if dt > 0.0:
+            derivative = (error - previous_error) / dt
+        else: 
+            derivative = 0.0
+
+        control = kp * error + ki * integral + kd * derivative
+        return control, error, integral
+
+    def reset_pid_state(self):
+        """Reset PID controller"""
+        self.previous_error = 0.0
+        self.integral = 0.0
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = NeatoFsm()
+    rclpy.spin(node)
+    node.drive(node.velocity,linear=0.0,angular=0.0)
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
+
+
+
+
+
+# retain info when transitioning between states to modify state behavior?
+
+
+""" 
+
+check front distance initially (same as before
+
+chech all, identify 
+
+take points that define wall
+
+draw line connecting wall
+
+take distance between pos and line as linear error
+take angle between line and heading as angular error
+
+add them somehow
+
+"""
