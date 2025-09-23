@@ -16,7 +16,6 @@ from rclpy.qos import qos_profile_sensor_data
 from neato2_interfaces.msg import Bump
 from threading import Thread, Event
 import numpy as np
-#import sklearn.linear_model, sklearn.decomposition
 
 # Default angle of sector to check lidar data, in rad
 DEFAULT_ANGLE_SWEEP = 15 * math.pi / 180
@@ -54,7 +53,7 @@ class NeatoFsm(Node):
         self.declare_parameter("Kp_drive",0.5)
         self.Kp_drive = self.get_parameter("Kp_drive").get_parameter_value().double_value
         # target_distance is the desired distance to the obstacle in front
-        self.declare_parameter("target_distance",0.6)
+        self.declare_parameter("target_distance",0.5)
         self.target_distance = self.get_parameter("target_distance").get_parameter_value().double_value
         # distance at which to register a wall to the right
         self.declare_parameter("identify_wall_distance",1.0)
@@ -97,6 +96,8 @@ class NeatoFsm(Node):
         self.last_loop_time = self.get_clock().now()
         # create publisher to visualize wall
         self.wall_vis_pub = self.create_publisher(MarkerArray,'wall_marker', 10)
+        self.wall_line_pub = self.create_publisher(Marker,'wall_line', 10)
+        self.target_line_pub = self.create_publisher(Marker,'target_line', 10)
 
     def parameters_callback(self, params):
         """Callback for whenever a parameter is changed."""
@@ -179,6 +180,8 @@ class NeatoFsm(Node):
                             if dist_front >= self.target_distance:
                                 if dist_right < self.identify_wall_distance:
                                     self.state = "wall_follow"
+                                    self.previous_correction_angle = 0.0
+                                    self.previous_error = 0.0
                                 else:
                                     self.state = "approach"
 
@@ -213,6 +216,7 @@ class NeatoFsm(Node):
         """
         x_list = [r_list[i] * math.cos(theta_list[i]) for i in range(len(r_list))]
         y_list = [r_list[i] * math.sin(theta_list[i]) for i in range(len(r_list))]
+        #print(f"xlist: {x_list}, ylist: {y_list}")
         return x_list,y_list
 
     def marker_from_lidar(self,dist,angle,id):
@@ -254,16 +258,7 @@ class NeatoFsm(Node):
         """
         data = np.column_stack([x_list, y_list])
 
-        #pca = sklearn.decomposition.PCA(n_components=2)
-        #pca.fit(data)
-
-        #mean = pca.mean_
-        #components = pca.components_
-
-        ##############
-
         # do pca using numpy svd rather than scikit learn
-
         mean = data.mean(axis=0)
         Q = data - mean
         _, _, Vt = np.linalg.svd(Q, full_matrices=False)
@@ -272,36 +267,27 @@ class NeatoFsm(Node):
         pc2 = np.array([-t[1], t[0]]) # pc2 is normal to pc1 
 
         # normal should face the origin 
-
-        rho = float(pc2 @ mean)
-        if rho < 0.0:
-            pc2 = -pc2
-            rho = -rho
-
-        #############
-
-        #pc1 = components[0,:]
-        #pc2 = components[1,:]
-
         if np.dot(mean,pc2) > 0.0:
             pc2 *= -1
 
         mean_target = mean + self.target_distance * pc2
 
-        wall_line_marker = self.make_line_marker(mean,pc1)
-        wall_target_marker = self.make_line_marker(mean_target,pc1)
+        wall_line_marker = self.make_line_marker(mean,pc1,True)
+        wall_target_marker = self.make_line_marker(mean_target,pc1,False)
 
-        err_linear = np.dot(mean,pc2) # linear distance of neato from wall
+        err_linear = np.dot(mean_target,pc2) # linear distance of neato from wall
         angle_wall = np.atan2(pc1[1],pc1[0])
         err_angular = angle_wall
 
+        #print(f"mean: {mean}, pc1: {pc1}, pc2: {pc2}")
+
         return err_linear,err_angular,wall_line_marker,wall_target_marker
 
-    def make_line_marker(self,start,normal):
+    def make_line_marker(self,start,normal,is_wall):
         """
         
         """
-        length = 10
+        length = 3
 
         start_pt = Point()
         start_pt.x = start[0]
@@ -319,11 +305,15 @@ class NeatoFsm(Node):
         wall_marker.points.append(start_pt)
         wall_marker.points.append(end_pt)
         wall_marker.type = 4
-        wall_marker.color.r = 1.0
-        wall_marker.color.g = 0.0
+        if is_wall:
+            wall_marker.color.r = 1.0
+            wall_marker.color.g = 0.0
+        else:
+            wall_marker.color.r = 0.0
+            wall_marker.color.g = 1.0
         wall_marker.color.b = 0.0
         wall_marker.color.a = 1.0
-        wall_marker.scale.x = 0.3
+        wall_marker.scale.x = 0.1
         wall_marker.id = 0
         return wall_marker
 
@@ -418,7 +408,7 @@ class NeatoFsm(Node):
             ccw = True
 
         for i in range(int(min_wall_dist_index-WALL_MIN_PTS),int(min_wall_dist_index)):
-            ray_angle_list.append(((self.scan_msg.angle_min + index*self.scan_msg.angle_increment) % 360))
+            ray_angle_list.append(((self.scan_msg.angle_min + i*self.scan_msg.angle_increment) % 360))
 
         return self.scan_msg.ranges[min_wall_dist_index-WALL_MIN_PTS:min_wall_dist_index],ray_angle_list,ccw
 
@@ -442,11 +432,15 @@ class NeatoFsm(Node):
 
         ### Currently just try to identify a wall on the right side
         dist_list,angle_list,_ = self.closest_wall_dist(angle_start=ANGLE_RIGHT_START,angle_end=ANGLE_RIGHT_END)
+        #print(f"r list {dist_list}, theta list {angle_list}")
         x_list,y_list = self.polar_to_cartesian(dist_list,angle_list)
         err_linear,err_angular,marker_wall,marker_target = self.wall_identify(x_list,y_list)
+        print(f"linear error: {err_linear}")
+        self.wall_line_pub.publish(marker_wall)
+        self.target_line_pub.publish(marker_target)
 
         # currently just manually encoding linear error here, sign could be off
-        control, self.previous_error, self.integral = self.pid_controller(target_dist, target_dist + err_linear, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
+        control, self.previous_error, self.integral = self.pid_controller(0, -1*err_linear, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
         
         # old error calculation:
         #control, self.previous_error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
