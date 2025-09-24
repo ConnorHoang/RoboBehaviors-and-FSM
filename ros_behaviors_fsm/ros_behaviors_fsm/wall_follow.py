@@ -1,6 +1,4 @@
-""" This node uses the laser scan measurement pointing straight ahead from
-    the robot and compares it to a desired set distance.  The forward velocity
-    of the robot is adjusted until the robot achieves the desired distance """
+""" FInite State Machine """
 
 from time import sleep
 import rclpy
@@ -36,15 +34,16 @@ class NeatoFsm(Node):
         """ Create NeatoFSM node.
         
         This node supports the implementation of a finite state machine with the following nodes:
-        - approach: Drive forwards until reaching target distance from wall. Proportionally decrease velocity with lowering distance.
+        - approach: Drive forwards until reaching target distance from wall. Proportionally decrease velocity with lowering distance as found by lidar.
         - wall follow: 
-        - turn
-        - wall search
-        - bump
-        
+        - turn: 
+        - wall search: 
+        - bump: 
+
         Subscribers:
             use_teleop (Bool): Toggle between teleop and wall following fsm suite
             scan (LaserScan): Receive lidar data from Neato
+            bump (Bump): Receive information from Neato bump sensors
 
         Publishers:
             cmd_vel (Twist): Send linear and anglar velocity instructions to Neato
@@ -52,93 +51,72 @@ class NeatoFsm(Node):
 
         Parameters:
             Kp_approach (float): Proportional gain for approach state
-            target_distance (float): Desired distance to obstacle
-            identify_wall_distance (float): Distance threshold for wall detection
+            target_distance (float): Desired distance to foward obstacle
+            identify_wall_distance (float): Distance threshold for wall detection (to the right)
             max_vel (float): Maximum linear velocity
             min_vel (float): Minimum linear velocity
             max_ang_vel (float): Maximum angular velocity
-            angle_correction (float): Angular velocity adjustment for wall following ###
+            angle_correction (float): Angular velocity correction for wall following ###
             angle_correction_tolerance (float): Tolerance for wall distance drift ###
-            pid_controls (List[float]): PID coefficients [Kp, Ki, Kd]
+            follow_pid_coefficients (List[float]): PID coefficients for wall following [Kp, Ki, Kd]
 
         Attributes:
             use_teleop (bool): Flag for teleop mode (initialized to True for starting in this state)
-            distance_to_obstacle (float): Latest distance to front obstacle
-            velocity (Twist): Current velocity command ###
-            bumped (Event): Threading event for bump sensor status
+            distance_to_obstacle (float): Used to communciate laser data to run_loop
+            velocity (Twist): Velocity (linear and angular) of Neato
+            bumped (Event): Threading event for bump sensor status ###
             state (str): Current FSM state
-            right_dist_list (List[float]): Rolling buffer of last 5 right wall distances ###
-            main_loop_thread (Thread): Thread for main loop processing
-            scan_msg (LaserScan): Most recent laser scan message
-            correction_angle (float): Angular velocity correction for wall distance
+            main_loop_thread (Thread): Thread to process main loop logic
+            scan_msg (LaserScan): Last recorded LIDAR scan
+            correction_angle (float): Angular velocity for adjusting wall distance
             integral (float): Integral term for wall following PID control
-            last_loop_time (Time): Clock time of last loop iteration
 
         MISC:
             run_loop: Main control loop running at 0.1s intervals
+            last_loop_time (Time): Clock time of last loop iteration
+            add_on_set_parameters_callback: Calls method to update parameter variables if ROS parameters change
         """ 
 
-        self.add_on_set_parameters_callback(self.parameters_callback)
-        self.use_teleop = True
-        # subscriber to see if we should listen to teleop
         self.create_subscription(Bool,'use_teleop',self.teleop_callback,qos_profile=qos_profile_sensor_data)
-        # the run_loop adjusts the robot's velocity based on latest laser data
-        self.create_timer(0.1, self.run_loop)
-        # Subscriber to intake laser sensor data
         self.create_subscription(LaserScan, 'scan', self.process_scan, qos_profile=qos_profile_sensor_data)
-        # Subscriber to bump sensor data
-        #self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
-        # publisher to send Neato velocity to ROS space
+        self.create_subscription(Bump,'bump',self.process_bump, qos_profile=qos_profile_sensor_data)
         self.vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
-        # distance_to_obstacle is used to communciate laser data to run_loop
-        self.distance_to_obstacle = None
-        # Kp is the constant or to apply to the proportional error signal
+        self.wall_vis_pub = self.create_publisher(MarkerArray,'wall_marker', 10)
+
         self.declare_parameter("Kp_approach",0.5)
         self.Kp_approach = self.get_parameter("Kp_approach").get_parameter_value().double_value
-        # target_distance is the desired distance to the obstacle in front
         self.declare_parameter("target_distance",0.6)
         self.target_distance = self.get_parameter("target_distance").get_parameter_value().double_value
-        # distance at which to register a wall to the right
         self.declare_parameter("identify_wall_distance",1.0)
         self.identify_wall_distance = self.get_parameter("identify_wall_distance").get_parameter_value().double_value
-        # maximum allowable linear speed of Neato
         self.declare_parameter("max_vel",0.2)
         self.max_vel = self.get_parameter("max_vel").get_parameter_value().double_value
-        # minimum allowable linear speed of Neato during approach
         self.declare_parameter("min_vel",0.08)
         self.min_vel = self.get_parameter("min_vel").get_parameter_value().double_value
-        # Max allowable angular velocity
         self.declare_parameter("max_ang_vel",0.5)
         self.max_ang_vel = self.get_parameter("max_ang_vel").get_parameter_value().double_value
-        # Angular velocity correction to add/subtract when following wall
         self.declare_parameter("angle_correction",0.1)
         self.angle_correction = self.get_parameter("angle_correction").get_parameter_value().double_value
-        # Tolerance for drifting further/closer to wall when following
         self.declare_parameter("angle_correction_tolerance",0.01)
         self.angle_correction_tolerance = self.get_parameter("angle_correction_tolerance").get_parameter_value().double_value
-        # velocity (speed and angle) of Neato
+        self.declare_parameter("follow_pid_coefficients",[0.5,0.0,0.0])
+        self.follow_pid_coefficients = self.get_parameter("follow_pid_coefficients").get_parameter_value().double_array_value
+
+        self.use_teleop = True
+        self.distance_to_obstacle = None
         self.velocity = Twist()
         # bump boolean for physical sensor where True is bumped
         self.bumped = Event()
-        # FSM state the robot is currently in
-        self.state = "approach" ### Change to be "wall_search"
-        # array of last 5 distances to right wall
-        self.right_dist_list = [0.0, 0.0, 0.0, 0.0, 0.0]
-        # Thread to process main loop logic
+        self.state = "wall_search"
         self.main_loop_thread = Thread(target=self.run_loop)
-        # Last recorded LIDAR scan
         self.scan_msg = None
-        # Angular velocity for adjusting wall distance
         self.correction_angle = 0.0
-        # integral for PID
         self.integral = 0 
-        # list of kp, ki, and kd coefficients for wall follow PID
-        self.declare_parameter("pid_controls",[0.5,0.0,0.0])
-        self.pid_controls = self.get_parameter("pid_controls").get_parameter_value().double_array_value
-        # clock stuff for timer
+
+        self.create_timer(0.1, self.run_loop)
         self.last_loop_time = self.get_clock().now()
-        # create publisher to visualize wall
-        self.wall_vis_pub = self.create_publisher(MarkerArray,'wall_marker', 10)
+        self.add_on_set_parameters_callback(self.parameters_callback)
+
 
     def parameters_callback(self, params):
         """Callback for whenever a parameter is changed."""
@@ -159,8 +137,8 @@ class NeatoFsm(Node):
                 self.angle_correction_tolerance = param.value
             elif param.name == "identify_wall_distance":
                 self.identify_wall_distance = param.value
-            elif param.name == "pid_controls":
-                self.pid_controls = param.value
+            elif param.name == "follow_pid_coefficients":
+                self.follow_pid_coefficients = param.value
         return SetParametersResult(successful=True)
 
     def run_loop(self):
@@ -176,8 +154,6 @@ class NeatoFsm(Node):
                 if self.scan_msg:
                     dist_right,angle_right,dist_right_list,angle_right_list = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
                     dist_front,angle_front,dist_front_list,angle_front_list = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
-                    self.right_dist_list.pop(0)
-                    self.right_dist_list.append(dist_right)
                     print(f"state: {self.state}")
                     print(f"dist front: {dist_front}, dist right: {dist_right}\n")
 
@@ -206,7 +182,7 @@ class NeatoFsm(Node):
                             # We should follow and make velocity adjustments to stay
                             # target distance from wall. If further than identify wall distance,
                             # we've lost our wall --- go back to approach
-                            self.wall_follow(dist_front,dist_right,self.right_dist_list,self.target_distance)
+                            self.wall_follow(dist_front,dist_right,self.target_distance)
                             if dist_front < self.target_distance:
                                 self.state = "turn"
 
@@ -354,7 +330,7 @@ class NeatoFsm(Node):
         min_wall_dist = None
         min_wall_dist_index = None
 
-        for index,range in enumerate(self.scan_msg.ranges):
+        for index, range in enumerate(self.scan_msg.ranges):
             if index >= WALL_MIN_PTS:
                 wall_dist = max(self.scan_msg.ranges[index-WALL_MIN_PTS:index])
                 if not min_wall_dist or wall_dist < min_wall_dist:
@@ -368,7 +344,7 @@ class NeatoFsm(Node):
 
         return self.scan_msg.ranges[min_wall_dist_index],ccw
 
-    def wall_follow(self, dist_front, dist_right, right_dist_list, target_dist):
+    def wall_follow(self, dist_front, dist_right, target_dist):
         """
         Drives in parralel to wall. Self-correcting by detecing distance wall on the right, comparing to average of previous times, 
         and turning to stay within range of wall. Tuning is important
@@ -386,7 +362,7 @@ class NeatoFsm(Node):
         if not hasattr(self, 'previous_correction_angle'):
             self.previous_correction_angle = 0.0
 
-        control, self.previous_error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
+        control, self.previous_error, self.integral = self.pid_controller(target_dist, dist_right, self.follow_pid_coefficients[0], self.follow_pid_coefficients[1], self.follow_pid_coefficients[2], self.previous_error, self.integral, self.dt)
         if self.dt > 0:
             angular_acceleration = (self.correction_angle - self.previous_correction_angle) / self.dt
         
@@ -413,7 +389,7 @@ class NeatoFsm(Node):
         return control, error, integral
 
     def reset_pid_state(self):
-        """Reset PID controller"""
+        """Reset PID controller to avoid data carry between diffrent wall_follow state instances"""
         self.previous_error = 0.0
         self.integral = 0.0
 
