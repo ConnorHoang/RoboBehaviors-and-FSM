@@ -93,7 +93,7 @@ class NeatoFsm(Node):
         self.min_vel = self.get_parameter("min_vel").get_parameter_value().double_value
         self.declare_parameter("max_ang_vel",0.5)
         self.max_ang_vel = self.get_parameter("max_ang_vel").get_parameter_value().double_value
-        self.declare_parameter("pid_controls",[0.5,0.0,0.0])
+        self.declare_parameter("pid_controls",[0.5,0.0,1.0])
         self.pid_controls = self.get_parameter("pid_controls").get_parameter_value().double_array_value
 
         # Parameter callback updates instance attributes when params
