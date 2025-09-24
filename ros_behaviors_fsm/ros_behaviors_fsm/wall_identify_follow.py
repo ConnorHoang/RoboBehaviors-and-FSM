@@ -165,74 +165,94 @@ class NeatoFsm(Node):
                 current_time = self.get_clock().now()
                 self.dt = (current_time - self.last_loop_time).nanoseconds / 1e9
                 self.last_loop_time = current_time
+
                 # Wait for the first LIDAR scan data before acting
                 if self.scan_msg:
-                    dist_right,angle_right,dist_right_list,angle_right_list = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
-                    dist_front,angle_front,dist_front_list,angle_front_list = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+                    dist_right,_,dist_right_list,angle_right_list = self.get_scan_angle(ANGLE_RIGHT_START, ANGLE_RIGHT_END)
+                    dist_front,_,dist_front_list,angle_front_list = self.get_scan_angle(ANGLE_FRONT_START, ANGLE_FRONT_END)
+                    
                     print(f"state: {self.state}")
                     print(f"dist front: {dist_front}, dist right: {dist_right}\n")
 
+                    # Define and publish array of Markers defining walls to front and sides
                     marker_arr = []
                     for i in range(len(dist_front_list)):
                         marker_arr.append(self.marker_from_lidar(dist_front_list[i],angle_front_list[i],i))
+                    for i in range(len(dist_right_list)):
+                        marker_arr.append(self.marker_from_lidar(dist_right_list[i],angle_right_list[i],i))
                     arr_to_publish = MarkerArray()
                     arr_to_publish.markers = marker_arr
                     self.wall_vis_pub.publish(arr_to_publish)
 
+                    # Logic dependent on current FSM state
                     match self.state:
                         case "approach":
-                            # Approach velocity is proportional to distance from target dist from wall
-                            # Constrained between min_vel and max_vel
+                            # Approach velocity is proportional to distance
+                            # from target,
+                            # constrained between min_vel and max_vel
                             approach_vel = self.Kp_drive * (dist_front - self.target_distance)
                             approach_vel = min(self.max_vel,max(self.min_vel,approach_vel))
                             self.drive(self.velocity, linear=approach_vel, angular=0.0)
-                            print(f"linear_vel: {approach_vel}")
+                            
+                            #print(f"linear_vel: {approach_vel}")
                             sleep(0.1)
                         
+                            # State change: turn if facing wall                        
                             if dist_front < self.target_distance:
                                 self.state = "turn"
 
                         case "wall_follow":
                             # Robot can detect a wall to the side
-                            # We should follow and make velocity adjustments to stay
-                            # target distance from wall. If further than identify wall distance,
+                            # We should follow and make velocity 
+                            # adjustments to stay target distance from 
+                            # wall. If further than identify_wall_distance,
                             # we've lost our wall --- go back to approach
+
                             self.wall_follow()
+
+                            # Facing wall, turn away from it 
                             if dist_front < self.target_distance:
                                 self.state = "turn"
 
+                            # Too far from wall, go back to approach
                             if dist_right >= self.identify_wall_distance:
                                 self.state = "approach"
 
                         case "turn":
-                            # Robot can detect a wall in front (positive x direction)
+                            # Robot can detect a wall in front 
                             # We should turn until the path ahead is clear
                             self.turn(dist_front)
 
+                            # If clear path ahead
                             if dist_front >= self.target_distance:
+                                # Follow wall if wall to right
                                 if dist_right < self.identify_wall_distance:
                                     self.state = "wall_follow"
                                     self.previous_correction_angle = 0.0
                                     self.previous_error = 0.0
                                 else:
+                                    # Otherwise, approach wall ahead
                                     self.state = "approach"
 
                         case "wall_search":
                             # Robot cannot detect a wall in front of it
-                            # We query LIDAR data to find the direction of the nearest wall
-                            # If our 
+                            # Find the nearest wall and turn until
+                            # facing a wall at nearest distance
 
-                            closest_dist_list,angle_list,ccw = self.closest_wall_dist()
+                            closest_dist_list,_,ccw = self.closest_wall_dist()
 
                             self.turn(ccw=ccw)
                             print(f"closest dist: {closest_dist_list}, dist front: {dist_front}, diff: {abs(closest_dist_list[0] - dist_front)}")
-                            #sleep(0.1)
+                            
+                            # If facing a wall as close as the closest
+                            # wall, start approaching it
                             if abs(closest_dist_list[0] - dist_front) < WALL_SEARCH_TOLERANCE:
                                 self.state = "approach"
 
                         case "bump":
                             # Bump sensor has been depressed
                             # We should stop moving immediately
+                            # Can be exited via teleop control
                             self.drive(self.velocity,linear=0.0,angular=0.0)
                         case _:
                             # Undefined state, throw an error
@@ -424,7 +444,21 @@ class NeatoFsm(Node):
 
     def get_scan_angle(self,min_angle=DEFAULT_ANGLE_SWEEP*-0.5, max_angle=DEFAULT_ANGLE_SWEEP*0.5):
         """
-        Queries the most recent LIDAR scan data for nearest wall distance across a given swept angle
+        Finds the minimum radial distance to an obstacle between the
+        specified angles. Used for state change logic dependent on
+        boolean checks of if a wall is close to the front or right
+
+        Args:
+            min_angle (float): Angle to begin measurement at
+            max_angle (float): Angle to end measurement at
+
+        Returns:
+            min_dist (float): radial distance to closest point
+            angle_min_dist (float): angle of closest point
+            dist_arr: (list[float]): array of distances of points
+                within angle bounds
+            angle_arr: (list[float]): array of angles of points
+                within angle bounds
         """
         min_robot_angle = self.scan_msg.angle_min
         max_robot_angle = self.scan_msg.angle_max
@@ -494,6 +528,18 @@ class NeatoFsm(Node):
         Search last recorded scan data for the nearest wall. 
         To prvent sensor noise from registering an obstacle closer than there
         is one, the maximum distance across WALL_MIN_PTS measurements is used
+        Return lists of distances/angles of points on identified wall
+
+        Args:
+            angle_start (float): angle to start wall sweep in
+            angle_end (float): angle to end wall sweep in
+
+        Returns:
+            range_list (list[float]): a list of radial distances to
+                the points on the nearest identified wall
+            ray_angle_list (list[float]): a list of the corresponding
+                angles defining those points on the wall
+            ccw (bool): direction to turn to face the identified wall
         """
         min_wall_dist = None
         min_wall_dist_index = None
@@ -501,35 +547,39 @@ class NeatoFsm(Node):
 
         for index,dist in enumerate(self.scan_msg.ranges):
             ray_angle = ((self.scan_msg.angle_min + index*self.scan_msg.angle_increment) % 360)
+            
+            # If bounds are defined, ensure ray_angle is within bounds
             if (angle_end is not None) and (angle_start is not None):
                 if ray_angle < angle_start or ray_angle > angle_end:
                     continue
             if index >= WALL_MIN_PTS:
+                # Dist is the maximum distance of each window of 
+                # WALL_MIN_PTS points, to deal with noise
                 wall_dist = max(self.scan_msg.ranges[index-WALL_MIN_PTS:index])
                 if not min_wall_dist or wall_dist < min_wall_dist:
                     min_wall_dist = wall_dist
                     min_wall_dist_index = index
         
+        # Identify quickest rotation direction to reach angle
         if min_wall_dist_index > (len(self.scan_msg.ranges)*0.5):
             ccw = False
         else:
             ccw = True
 
         for i in range(int(min_wall_dist_index-WALL_MIN_PTS),int(min_wall_dist_index)):
+            # add corresponding ray angles to ray_angle_list after identifying wall
             ray_angle_list.append(((self.scan_msg.angle_min + i*self.scan_msg.angle_increment) % 360))
 
         return self.scan_msg.ranges[min_wall_dist_index-WALL_MIN_PTS:min_wall_dist_index],ray_angle_list,ccw
 
     def wall_follow(self):
         """
-        Drives in parralel to wall. Self-correcting by detecing distance wall on the right, comparing to average of previous times, 
-        and turning to stay within range of wall. Tuning is important
+        Drives parallel to wall. Identifies target path offset from
+        wall, calculates error between position and target path, and
+        uses error, accumulated error over time, and change in error
+        to correct heading towards the target path. 
 
-        Args:
-            
-        Action;
-            Move foward
-            Turn right/left
+        Correction behavior can be tuned via the pid_controls param
         """
 
         if not hasattr(self, 'previous_error'):
@@ -540,21 +590,21 @@ class NeatoFsm(Node):
 
         ### Currently just try to identify a wall on the right side
         dist_list,angle_list,_ = self.closest_wall_dist(angle_start=ANGLE_RIGHT_START,angle_end=ANGLE_RIGHT_END)
-        #print(f"r list {dist_list}, theta list {angle_list}")
+
+        # Calculate error, publish visualizations on wall and path
         x_list,y_list = self.polar_to_cartesian(dist_list,angle_list)
         err_linear,err_angular,marker_wall,marker_target = self.wall_identify(x_list,y_list)
         print(f"linear error: {err_linear}")
         self.wall_line_pub.publish(marker_wall)
         self.target_line_pub.publish(marker_target)
 
-        # currently just manually encoding linear error here, sign could be off
+        # pass error through PID controller to get angle adjustment
         control, self.previous_error, self.integral = self.pid_controller(0, -1*err_linear, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
         
-        # old error calculation:
-        #control, self.previous_error, self.integral = self.pid_controller(target_dist, dist_right, self.pid_controls[0], self.pid_controls[1], self.pid_controls[2], self.previous_error, self.integral, self.dt)
         if self.dt > 0:
             angular_acceleration = (self.correction_angle - self.previous_correction_angle) / self.dt
         
+        # apply correction to hopefully reduce error
         self.correction_angle = max(min(self.max_ang_vel,control),-1*self.max_ang_vel)
 
         print(f"error: {self.previous_error}, control: {control}, correction_angle: {self.correction_angle}, angular_acceleration: {angular_acceleration},  integral: {self.integral}")
@@ -588,7 +638,6 @@ class NeatoFsm(Node):
         max_integral = 1.0
         integral = max(-max_integral, min(max_integral, integral)) # windup protection
 
-
         if dt > 0.0:
             derivative = (error - previous_error) / dt
         else: 
@@ -611,27 +660,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-# retain info when transitioning between states to modify state behavior?
-
-
-""" 
-
-check front distance initially (same as before
-
-chech all, identify 
-
-take points that define wall
-
-draw line connecting wall
-
-take distance between pos and line as linear error
-take angle between line and heading as angular error
-
-add them somehow
-
-"""
