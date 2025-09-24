@@ -2,16 +2,44 @@
 CompRobo 2025 - Ben Ricket, Connor Hoang
 
 ## Overview
-This warmup project serves as an introduction to ROS2 and working with the Neatos with various tasks. We implemented the following five behaviors for this project: wall following, wall detection, wall approaching, turning, and stopping.
+This warmup project serves as an introduction to ROS2 and working with the Neatos with various tasks. We implemented the following five behaviors for this project: teleop control, wall following, wall detection, wall approaching, turning, and stopping.
 ### List of Behaviors
-1. K
-2. l
-3. l
+1. Manual teleop control
+2. Wall search (turn until facing nearest wall)
+3. Wall approach (proportional approach velocity given distance to wall)
+4. Turning until path ahead is clear
+5. Wall following (fit line to wall, follow at distance)
+6. Stop when bump sensor pressed
 ## Behaviors Implemented
 ### Overall Code Structure
-The code for this project is a single python file ```wall_follow.py``` structured into a singular ```NeatoFsm``` class that extends the ROS2 node. Inside the primary run loop of the node is a switch case that that explicitly checks for "approach", "wall_follow", ___, and ___. Excluding the initial state which is ```wall find```, each case first calls a method to execute the code related to the state and then checks if any of the transition modes are met (i.e. in approach the Neato is instructed to have a certain linear velocity and then checks if it is within the desired closeness to the wall).
 
-We chose this structure for its___. 
+The code for this project is a single python file ```wall_follow.py``` structured into a singular ```NeatoFsm``` class that extends the ROS2 node. Inside the primary run loop of the node is a switch case that that explicitly checks for `approach`, `wall_follow`, `turn`, and `bump`, excluding the initial state ```wall_search```. (A separate `use_teleop` state is not encoded in the state attribute of the node, but rather in the `/use_teleop` ROS2 topic, directing the autonomous node to wait for the teleoperation node to relinquish control.) In all cases, the robot queries LIDAR data from its sensor to detect whether a wall is present in front of it or to the side, executes logic based on its current state, and uses the data on wall presence to the front or right to execute any state change logic. For instance, if a wall is ever present close to and in front of the robot, the state changes to `turn`. 
+
+We chose this structure for its extensibility --- the overall logic is less neat and more complex than a state machine which uses PID velocity correction to account for all wall shapes, even sharp turns. However, encoding common behaviors like turning or approaching a wall into their own states leads to many options for extensibility --- the robot may want to turn sharply at a distance from an obstacle different than the distance it attempts to follow a wall at, for instance. Similarly, sharp turns can be performed in place with a dedicated `turn` state, whereas our current implementation of the `wall_follow` behavior constantly moves forwards while adjusting the angle of the robot. 
+
+![State diagram of autonomous states](images/state_diagram.jpg)
+
+The transition from autonomous states to teleoperation is independent of what autonomous state the robot is in, and occurs when the `simple_teleop` node reads in a SPACE keypress from stdin. Pressing enter then enters autonomous mode again, beginning at `wall_search` as before. 
+
+![State diagram of autonomous/teleop high level state](images/state_diagram_highlevel.jpg)
+
+### Teleoperation
+#### Logic
+When specifically requested by the user, the robot should listen to velocity commands passed by keypresses on the terminal running the code --- this is to help drive the robot to a desired location when testing autonomous mode, exiting the `bump` state if the bump sensor is triggered, or for any other reason in which manual control of the robot would be useful.
+#### Implementation
+A separate node `simple_teleop` is initialized in another terminal. This node continually reads `stdin` to detect specific keypresses, which trigger the following logic: 
+
+Space: pass True to `/use_teleop` informing the autonomous node to pause operation, and pass a zero-velocity command to `/cmd_vel` to stop the robot. 
+
+Enter: pass False to `/use_teleop` informing the autonomous node to resume operation.
+
+W: Publish velocity command for driving linearly forward
+A: Publish velocity command for turning counterclockwise
+S: Publish velocity command for driving linearly backward
+D: Publish velocity command for driving clockwise
+
+'\x03' (SIGINT / Ctrl + C): Raise a KeyboardInterrupt to allow Ctrl+C to halt the program execution. 
+
 ### Wall Search
 #### Logic
 When the wall following node is initialized, the robot should first identify the nearest wall to it, which is not guaranteed to be in front of it. In this state, the robot uses its LIDAR scan data to detect the nearest wall and rotate until it is facing that wall or an equally close wall, before transitioning into an `approach` state. 
@@ -52,7 +80,15 @@ A subscription to the `/bump` topic and corresponding callback changes the state
 #### Logic
 The Neato is attempting to drive parallel to the wall directly to its right.
 #### Implementation
-The ```wall_follow``` case starts by calculating the linear velocity of the Neato is always set to a constant velocity as defined by the parameter ```self.declare_parameter("max_vel",0.2)```.
+The ```wall_follow``` case starts by assuming a wall is already present to the right (condition for transitioning into this state.) LIDAR data from the right of the robot (`ANGLE_RIGHT_START` to `ANGLE_RIGHT_END` by default) is used to sample a number of LIDAR data points, where the minimum of the maximum distances in a sliding window of `WALL_MIN_PTS` points is used to avoid erroneously small readings due to sensor noise. After this filtered minimum is taken, the distances and angles of `WALL_MIN_PTS` points surrounding the closest point are converted to cartesian coordinates in the same LIDAR coordinate frame and passed to `wall_identify()` for principacl component analysis. 
+
+We assume that the shape of the wall can be locally approximated with a straight line in the (x,y) plane, and that our data points approximate the shape of this wall. Given these assumptions, after centering the data points at the origin by subtracting out the mean, the first principal component `pc1` should explain the most of the variance in the data point positions, corresponding to the direction of the wall. The second principal component `pc2` (equivalent to `pc1` rotated 90 degrees) therefore gives the unit normal to the wall. We flip the sign of `pc2` if it points away from the robot to ensure our target path is correct. 
+
+As we want to follow the wall maintaining a constant distance, the target path we follow is equivalent to the wall plus `pc2` scaled by our follow distance `target_distance`. The wall is equivalent to the line between the mean and the mean plus `pc1`. We create markers visualizing both the wall and our target path, and compute the robot's linear error from the target path by taking the scalar projection of the distance between the robot and a given point on the path (mean plus scaled `pc2`) onto the unit normal, giving us the perpendicular (closest) distance. 
+
+In theory, this should be able to account for sharp turns given proper parameters. Sharp inwards turns would lead to a right-angle being described by a (albeit poorly fit) line angling inwards, driving the robot to turn in the proper way, whereas sharp outwards turns would yield the same line once the robot progressed far enough to sample past the corner. Because of this, we thought a linear fit to be justified and adequate for our use case.
+
+The difference between the target path position and the robot position is used as the error in a PID controller which controls the angular velocity of the robot, helping it make adjustments in heading towards the path. The coefficients governing the PID controller, `kP`, `kI`, and `kD`, can be controlled by passing a three-element list of floats as the ROS2 parameter `/neato_fsm PID_controls`, with each element equivalent to the respective coefficient. 
 
 Transitions:
 
@@ -63,11 +99,18 @@ A subscription to the `/bump` topic and corresponding callback changes the state
 This state only exists to hold the robot in place when the bump sensor publishes nonzero values to `/bump`. 
 
 #### Implementation
-A subscription to the `/bump` topic and corresponding callback changes the state to `bump` if the bump sensor ever outputs nonzero values, and sends a zero-velocity command to stop the robot. There are no transitions from this state --- the script must be stopped and run again to resume operation of the robot. Ideally, the robot should not enter this state if the controls and parameters are tuned properly, though in practice this is not always the case. 
+A subscription to the `/bump` topic and corresponding callback changes the state to `bump` if the bump sensor ever outputs nonzero values, and sends a zero-velocity command to stop the robot. The only transition out of this state requires teleop command be enabled, the robot be driven away such that the bump sensor is no longer pressed, and teleop be disabled again, as exiting teleop enters the `wall_search` state by default. Ideally, the robot should not enter this state if the controls and parameters are tuned properly, though in practice this is not always the case. 
 
 ## Conclusion
 
 ### Takeaways
+Working with valid LIDAR data was easier than we had initially anticipated --- our intial state machine layout assumed there would be times when the robot was too far from walls/obstacles to get good LIDAR readings, and would have to drive in a direction (`approach`) just to find a wall. In reality, testing the robot inside a classroom, the LIDAR data seemed to always identify a wall with relative consistency, leading us to implement the smarter `wall_search` state for identifying the nearest wall. 
+
+We also made the initial assumption that we would use simple binary checks of wall presence in front and to the side of the robot rather than fitting a line or curve to define the shape of the detected wall, which ended up working passably, but was less easily extensible to make it more robust. This also required turning be a separate state not incorporated into the PID controller.
+
+To make the code more robust, we fit a line to the measured point on the wall such that sensor noise would play less of a large role on our measured error every iteration, leading to smoother behavior. Theoretically, a wide range of data points together with aggressive PID control could lead to sharp angles being approximated with increasingly angled lines, removing the need for a separate `turn` state; however, given the functionality of the state we had already implemented, it made sense to continue having `turn` be a separate state. 
+
+
 ### Challenges
 One of the challenges we faced throughout the project was tuning paramters. Specifically, the angle of the search cone that determined the distances from the robot and the coefficents in the wall following PID logic. 
 
