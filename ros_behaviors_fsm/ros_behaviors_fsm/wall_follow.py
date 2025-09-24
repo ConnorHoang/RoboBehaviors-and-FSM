@@ -33,8 +33,52 @@ class NeatoFsm(Node):
     """ This class wraps the basic functionality of the node """
     def __init__(self):
         super().__init__('neato_fsm')
+        """ Create NeatoFSM node.
+        
+        This node supports the implementation of a finite state machine with the following nodes:
+        - approach: Drive forwards until reaching target distance from wall. Proportionally decrease velocity with lowering distance.
+        - wall follow: 
+        - turn
+        - wall search
+        - bump
+        
+        Subscribers:
+            use_teleop (Bool): Toggle between teleop and wall following fsm suite
+            scan (LaserScan): Receive lidar data from Neato
+
+        Publishers:
+            cmd_vel (Twist): Send linear and anglar velocity instructions to Neato
+            wall_marler (MarkerArray): ____
+
+        Parameters:
+            Kp_approach (float): Proportional gain for approach state
+            target_distance (float): Desired distance to obstacle
+            identify_wall_distance (float): Distance threshold for wall detection
+            max_vel (float): Maximum linear velocity
+            min_vel (float): Minimum linear velocity
+            max_ang_vel (float): Maximum angular velocity
+            angle_correction (float): Angular velocity adjustment for wall following ###
+            angle_correction_tolerance (float): Tolerance for wall distance drift ###
+            pid_controls (List[float]): PID coefficients [Kp, Ki, Kd]
+
+        Attributes:
+            use_teleop (bool): Flag for teleop mode (initialized to True for starting in this state)
+            distance_to_obstacle (float): Latest distance to front obstacle
+            velocity (Twist): Current velocity command ###
+            bumped (Event): Threading event for bump sensor status
+            state (str): Current FSM state
+            right_dist_list (List[float]): Rolling buffer of last 5 right wall distances ###
+            main_loop_thread (Thread): Thread for main loop processing
+            scan_msg (LaserScan): Most recent laser scan message
+            correction_angle (float): Angular velocity correction for wall distance
+            integral (float): Integral term for wall following PID control
+            last_loop_time (Time): Clock time of last loop iteration
+
+        MISC:
+            run_loop: Main control loop running at 0.1s intervals
+        """ 
+
         self.add_on_set_parameters_callback(self.parameters_callback)
-        """Combine all below comments to actually decent docstring""" ##
         self.use_teleop = True
         # subscriber to see if we should listen to teleop
         self.create_subscription(Bool,'use_teleop',self.teleop_callback,qos_profile=qos_profile_sensor_data)
@@ -49,8 +93,8 @@ class NeatoFsm(Node):
         # distance_to_obstacle is used to communciate laser data to run_loop
         self.distance_to_obstacle = None
         # Kp is the constant or to apply to the proportional error signal
-        self.declare_parameter("Kp_drive",0.5)
-        self.Kp_drive = self.get_parameter("Kp_drive").get_parameter_value().double_value
+        self.declare_parameter("Kp_approach",0.5)
+        self.Kp_approach = self.get_parameter("Kp_approach").get_parameter_value().double_value
         # target_distance is the desired distance to the obstacle in front
         self.declare_parameter("target_distance",0.6)
         self.target_distance = self.get_parameter("target_distance").get_parameter_value().double_value
@@ -99,8 +143,8 @@ class NeatoFsm(Node):
     def parameters_callback(self, params):
         """Callback for whenever a parameter is changed."""
         for param in params:
-            if param.name == "Kp_drive":
-                self.Kp_drive = param.value
+            if param.name == "Kp_approach":
+                self.Kp_approach = param.value
             elif param.name == "target_distance":
                 self.target_distance = param.value
             elif param.name == "max_vel":
@@ -148,7 +192,7 @@ class NeatoFsm(Node):
                         case "approach":
                             # Approach velocity is proportional to distance from target dist from wall
                             # Constrained between min_vel and max_vel
-                            approach_vel = self.Kp_drive * (dist_front - self.target_distance)
+                            approach_vel = self.Kp_approach * (dist_front - self.target_distance)
                             approach_vel = min(self.max_vel,max(self.min_vel,approach_vel))
                             self.drive(self.velocity, linear=approach_vel, angular=0.0)
                             print(f"linear_vel: {approach_vel}")
