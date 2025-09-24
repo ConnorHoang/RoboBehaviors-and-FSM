@@ -16,9 +16,9 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='root',
-    maintainer_email='root@todo.todo',
-    description='TODO: Package description',
+    maintainer='benricket',
+    maintainer_email='bricket@olin.edu',
+    description='Wall following behavior for Neato robot',
     license='MIT',
     tests_require=['pytest'],
     entry_points={
