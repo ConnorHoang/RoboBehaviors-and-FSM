@@ -122,7 +122,7 @@ class NeatoFsm(Node):
             params updated.
 
         Returns:
-            rcl_interfaces.msg.SetParameterResult with successful=True,
+            rcl_interfaces.masg.SetParameterResult with successful=True,
             indicating parameters were updated successfully. 
         """
         for param in params:
@@ -179,7 +179,7 @@ class NeatoFsm(Node):
                     for i in range(len(dist_front_list)):
                         marker_arr.append(self.marker_from_lidar(dist_front_list[i],angle_front_list[i],i))
                     for i in range(len(dist_right_list)):
-                        marker_arr.append(self.marker_from_lidar(dist_right_list[i],angle_right_list[i],i))
+                        marker_arr.append(self.marker_from_lidar(dist_right_list[i],angle_right_list[i],i+len(dist_front_list)))
                     arr_to_publish = MarkerArray()
                     arr_to_publish.markers = marker_arr
                     self.wall_vis_pub.publish(arr_to_publish)
@@ -239,9 +239,9 @@ class NeatoFsm(Node):
                             # Find the nearest wall and turn until
                             # facing a wall at nearest distance
 
-                            closest_dist_list,_,ccw = self.closest_wall_dist()
+                            closest_dist_list,_,_ = self.closest_wall_dist()
 
-                            self.turn(ccw=ccw)
+                            self.turn()
                             print(f"closest dist: {closest_dist_list}, dist front: {dist_front}, diff: {abs(closest_dist_list[0] - dist_front)}")
                             
                             # If facing a wall as close as the closest
