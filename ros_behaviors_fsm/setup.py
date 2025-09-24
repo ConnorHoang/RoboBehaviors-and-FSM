@@ -23,7 +23,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'wall_follow = ros_behaviors_fsm.wall_follow:main',
             'simple_teleop = ros_behaviors_fsm.simple_teleop:main',
             'wall_identify_follow = ros_behaviors_fsm.wall_identify_follow:main'
         ],
