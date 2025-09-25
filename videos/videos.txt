@@ -1,0 +1,1 @@
+Video files are snippets of BAG files in Bag_folder.
