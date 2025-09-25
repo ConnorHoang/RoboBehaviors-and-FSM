@@ -1,6 +1,7 @@
 """
 ROS2 Node to add teleop control to an autonomous robot
 """
+from time import sleep
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, Vector3
@@ -69,6 +70,8 @@ class SimpleTeleop(Node):
             if key == 'a':
                 self.drive(angular=0.5)
             if key == 's':
+                self.drive(linear=0.0)
+                sleep(0.3)
                 self.drive(linear=-0.2)
             if key == 'd':
                 self.drive(angular=-0.5)
