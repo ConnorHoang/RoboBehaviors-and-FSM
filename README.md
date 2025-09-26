@@ -128,6 +128,7 @@ As a minor aside, structuring the code as a single ROS2 node effectively led to 
 Were we to develop this project further, the current code could benefit from an automated pipeline to tune the wall follow PID parameters. To achieve this, we could develop a Gazebo simulation to use specifically to test the wall follow performance, create a launch file initializing this simulation with the wall_follow behavior, and develop a metric to automatically measure the performance of the wall follow behavior and tune the parameters accordingly. 
 
 Another possible extension of the work would be obstacle avoidance, either as a standalone state or integrated with wall following. For the latter, a forward lidar cone could be used to detect obstacles in the Neato's path and increase or decrease the target distance from the wall in order to avoid hitting the object.
+
 ### Attribution of Work
 Ben led the integration of lidar sensors into the work, notably including the "wall determination" functionality and the wall search state.
 Connor led the implementation of wall following given the sensor data and initial state machine logic.
@@ -135,3 +136,12 @@ Remaining work was distributed between members.
 
 ### Additional Documentation
 Video and bag files are included in the repo as validation for the stated behaviors.
+
+### Usage
+The following steps are how to use the code. They assume all dependencies are installed.
+1. Enter in terminal: ```colcon build --symlink-install```
+2. Connect to Neato or Gazebo Neato simulator. This code is expected to work on similar lidar and movement profiles, but has not been tested.
+For the following 2 steps, open a new terminal and source using ```source install/setup.bash``` before doing the next step.
+3. Enter in terminal: ```ros2 run ros_behaviors_fsm wall_identify_follow```
+4. Enter in terminal: ```ros2 run ros_behaviors_fsm simple_teleop```
+5. Enjoy! Teleoperation commands can be made by pressing the corresponding button in the terminal that ```ran simple_teleop```. Refer to the "Teleoperation" and rest of this ReadMe document to understand which buttons to press.
