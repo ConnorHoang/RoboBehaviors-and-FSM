@@ -141,7 +141,6 @@ Video and bag files are included in the repo as validation for the stated behavi
 The following steps are how to use the code. They assume all dependencies are installed.
 1. Enter in terminal: ```colcon build --symlink-install```
 2. Connect to Neato or Gazebo Neato simulator. This code is expected to work on similar lidar and movement profiles, but has not been tested.
-For the following 2 steps, open a new terminal and source using ```source install/setup.bash``` before doing the next step.
-3. Enter in terminal: ```ros2 run ros_behaviors_fsm wall_identify_follow```
-4. Enter in terminal: ```ros2 run ros_behaviors_fsm simple_teleop```
+3. Open a new terminal, source using ```source install/setup.bash``` and enter in terminal: ```ros2 run ros_behaviors_fsm wall_identify_follow```
+4. Open a new terminal, source using ```source install/setup.bash``` and enter in terminal: ```ros2 run ros_behaviors_fsm simple_teleop```
 5. Enjoy! Teleoperation commands can be made by pressing the corresponding button in the terminal that ```ran simple_teleop```. Refer to the "Teleoperation" and rest of this ReadMe document to understand which buttons to press.
